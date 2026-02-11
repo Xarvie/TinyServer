@@ -1,0 +1,22 @@
+root        = "./"
+thread      = 4
+harbor      = 0
+logger      = nil
+logservice  = "snlua"
+bootstrap   = "snlua bootstrap"
+start       = "main"
+
+lua_path    = root .. "service/?.lua;"
+            .. root .. "framework/?.lua;"
+            .. root .. "sdk/?.lua;"
+            .. root .. "module/login/?.lua;"
+            .. root .. "module/echo/?.lua;"
+            .. root .. "module/bag/?.lua;"
+            .. root .. "module/rank/?.lua;"
+            .. root .. "module/pvp/?.lua;"
+            .. root .. "config/?.lua;"
+            .. root .. "test/?.lua"
+
+lua_cpath   = root .. "skynet/luaclib/?.so"
+luaservice  = root .. "service/?.lua"
+cpath       = root .. "skynet/cservice/?.so"
