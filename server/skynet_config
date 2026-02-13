@@ -1,0 +1,37 @@
+-- server/skynet_config
+
+-- 根目录：当前目录 (server/)
+local root = "./"
+
+-- 【核心修改】运行时目录：指向上一级 (../runtime/)
+local rt = "../runtime/"
+
+thread     = 4
+harbor     = 0
+bootstrap  = "snlua bootstrap"
+start      = "Main"
+
+-- 加载器路径 (依赖 rt 变量，会自动指向 ../runtime/lualib/loader.lua)
+lualoader  = rt .. "lualib/loader.lua"
+
+-- 服务路径搜索
+-- 1. rt..service: 找 ../runtime/service (引擎自带服务)
+-- 2. root..Config: 找 ./Config (你的配置服务)
+-- 3. root..Agent: 找 ./Agent (你的代理服务)
+-- ... 建议使用通配符匹配当前目录下的所有子目录，或者保持你原来的写法
+-- 下面这个写法是最通用的：
+luaservice = rt.."service/?.lua;"..root.."?.lua;"..root.."Agent/?.lua;"..root.."Gate/?.lua;"..root.."Db/?.lua;"..root.."Cross/?.lua"
+
+-- Lua 库路径
+-- 1. rt..lualib: 引擎库
+-- 2. root..Lualib: 你的公共库
+lua_path   = rt.."lualib/?.lua;"..rt.."lualib/?/init.lua;"..root.."Lualib/?.lua;"..root.."?.lua"
+
+-- C 库路径 (DLL)
+lua_cpath  = rt .. "luaclib/?.dll"
+
+-- C 服务路径
+cpath      = rt .. "cservice/?.dll"
+
+logservice = "logger"
+logger     = nil

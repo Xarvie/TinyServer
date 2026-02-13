@@ -1,0 +1,1 @@
+pacman -S mingw-w64-clang-x86_64-python-websockets mingw-w64-clang-x86_64-python-protobuf mingw-w64-clang-x86_64-python-grpcio-tools

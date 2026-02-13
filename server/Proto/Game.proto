@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+// ====== 认证 ======
+
+// MsgId 1001
+message C2S_Login {
+    string account  = 1;
+    string password = 2;
+}
+
+// MsgId 1002
+message S2C_LoginResult {
+    int32 code = 1;
+    int32 uid  = 2;
+}
+
+// MsgId 1003
+message C2S_Register {
+    string account  = 1;
+    string password = 2;
+}
+
+// MsgId 1004
+message S2C_RegisterResult {
+    int32 code = 1;
+    int32 uid  = 2;
+}
+
+// ====== 玩家 ======
+
+// MsgId 1101
+message C2S_Logout {
+}
+
+// MsgId 1102
+message S2C_Kick {
+    int32 reason = 1;
+}
+
+// ====== 跨服/多人 ======
+
+// MsgId 2001
+message C2S_JoinRoom {
+    string roomId = 1;
+}
+
+// MsgId 2002
+message S2C_JoinResult {
+    int32  code   = 1;
+    string roomId = 2;
+}
+
+// MsgId 2003
+message C2S_RoomAction {
+    int32  actionType = 1;
+    string payload    = 2;
+}
+
+// MsgId 2004
+message S2C_RoomSync {
+    string snapshot = 1;
+}
+
+// ====== 背包 ======
+message C2S_UseItem {
+    int32 itemId = 1;
+    int32 count = 2;
+}
+
+message S2C_BagUpdate {
+    int32 itemId = 1;
+    int32 count = 2;
+}
+
+// ====== 心跳 ======
+
+// MsgId 9001
+message C2S_Ping {
+    int64 timestamp = 1;
+}
+
+// MsgId 9002
+message S2C_Pong {
+    int64 timestamp = 1;
+}
