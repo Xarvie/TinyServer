@@ -62,6 +62,15 @@ end
 function SessionMgr:auth(fd, uid, agent)
     local entry = self.byFd[fd]
     if not entry then return nil end
+
+    -- BugFix BUG-8: 同fd以不同uid重新认证时，清理旧uid的byUid映射
+    -- 防止 byUid[oldUid] 变成悬挂引用
+    if entry.uid and entry.uid ~= uid then
+        if self.byUid[entry.uid] == entry then
+            self.byUid[entry.uid] = nil
+        end
+    end
+
     -- 如果另一个fd已绑定同uid(同gate顶号)，先解除旧映射
     local oldEntry = self.byUid[uid]
     local displaced = nil
@@ -70,6 +79,7 @@ function SessionMgr:auth(fd, uid, agent)
             fd    = oldEntry.fd,
             uid   = oldEntry.uid,
             agent = oldEntry.agent,
+            gate  = oldEntry.gate,  -- BugFix BUG-19: 补充gate字段，支持跨gate场景
         }
         oldEntry.uid   = nil
         oldEntry.agent = nil

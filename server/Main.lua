@@ -68,8 +68,11 @@ skynet.start(function()
 
     -- gate 最后初始化: skynet cast 按发送顺序投递到同一目标，
     -- 但不同目标之间无序。为确保 agent/db 先处理完 init，
-    -- 利用 skynet.sleep(0) 让出一次调度，让前面的 cast 有机会被处理。
-    skynet.sleep(0)
+    -- BugFix BUG-11: sleep(0) 仅让出一个调度周期，不足以等待 agent 中
+    --   ModuleManager.scan(lfs遍历+require) 完成。改为 sleep(100)(1秒)。
+    --   更健壮的方案: agent/db/cross init完成后 cast "initDone" 回 main，
+    --   main 收集齐全后再初始化 gate。
+    skynet.sleep(100)
 
     for i, gateAddr in ipairs(gates) do
         Cast.send(gateAddr, "init", {

@@ -5,12 +5,13 @@
 -- 职责:
 --   1. 封装对 entry 底层字段的访问(fd/gate/data等)
 --   2. 提供通用工具方法(pushClient/kick/rebind)
---   3. 作为模块间相互访问的中介(player.bag / player.role)
+--   3. 作为模块间相互访问的中介(player.Bag / player.Role)
 --
 -- 设计约束:
 --   - Player 本身 不 注册为业务模块(scan时跳过 player/ 目录)
 --   - Player 不持有业务状态，所有持久化数据存于 entry.data[modName]
---   - 模块间通信: player.bag:someMethod() (直接方法调用，同进程零开销)
+--   - 模块间通信: player.Bag:someMethod() (直接方法调用，同进程零开销)
+--   - 注意: modName 大小写敏感，以模块声明的 modName 为准
 
 local Cast  = require "Cast"
 
@@ -19,7 +20,7 @@ local Cast  = require "Cast"
 ---@field uid      integer      冗余缓存，避免频繁 entry.uid
 ---@field fd       integer      当前连接fd
 ---@field gate     integer      当前gate地址
----@field [string] table        动态挂载的模块实例(player.bag, player.role, ...)
+---@field [string] table        动态挂载的模块实例(player.Bag, player.Role, ...)
 local Player = {}
 Player.__index = Player
 

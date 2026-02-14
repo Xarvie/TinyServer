@@ -221,8 +221,12 @@ local function startHeartbeatTimer()
         local timeoutFds = sessions:collectTimeout(heartbeatSec)
         for _, fd in ipairs(timeoutFds) do
             skynet.error(string.format("[Gate%d] heartbeat timeout fd=%d", gateIndex, fd))
-            local entry = sessions:remove(fd)
+            -- BugFix BUG-6: 调整顺序为 push → remove → close
+            -- 先推送踢线消息(此时session仍在，fd有效)
             pushClient(fd, MsgId.S2C_Kick, { reason = -2 })
+            -- 再移除session(获取entry用于通知agent)
+            local entry = sessions:remove(fd)
+            -- 最后关闭连接
             safeClose(fd)
             if entry and entry.uid and entry.agent then
                 Cast.send(entry.agent, "offline", {
@@ -355,13 +359,12 @@ function handler.authResult(source, result)
             uid  = result.uid or 0,
         })
     else
-        -- 认证失败: 推送错误码后断开连接，释放session
+        -- BugFix BUG-7: 认证失败仅推送错误码，不断开连接，允许客户端重试
+        -- 只在异常情况(协议违规等)才断开，密码错误/账号不存在属正常业务错误
         pushClient(result.fd, result.msgId, {
             code = result.code,
             uid  = 0,
         })
-        sessions:remove(result.fd)
-        safeClose(result.fd)
     end
 end
 
@@ -389,8 +392,19 @@ function handler.kick(source, req)
         end
     end
     pushClient(req.fd, MsgId.S2C_Kick, { reason = req.reason or 0 })
-    sessions:remove(req.fd)
+    local entry = sessions:remove(req.fd)
     safeClose(req.fd)
+    -- BugFix BUG-13: 通知 agent 该玩家离线
+    -- 当前仅 agent 顶号时会 cast kick，agent 已自行处理。
+    -- 但未来若有 GM/防作弊等来源，agent 不会收到 offline，entry 会残留。
+    -- agent 的 offline handler 有 fd 校验，不会误删新连接的 entry。
+    if entry and entry.uid and entry.agent then
+        Cast.send(entry.agent, "offline", {
+            uid  = entry.uid,
+            fd   = req.fd,
+            gate = skynet.self(),
+        })
+    end
 end
 
 --- 优雅关闭
@@ -436,7 +450,11 @@ function handler.shutdown(source)
 
     sessions = Session.new()  -- 清空
     skynet.error(string.format("[Gate%d] shutdown complete", gateIndex))
-    Cast.send(coordinator, "shutdownAck")
+    -- BugFix BUG-12: 延迟发送 ack，给 agent 时间处理刚发出的 offline 消息
+    -- 避免 main 提前进入 phase2 向 agent 发 shutdown 时，offline 尚未处理完
+    skynet.timeout(10, function()
+        Cast.send(coordinator, "shutdownAck")
+    end)
 end
 
 ----------------------------------------------------------------

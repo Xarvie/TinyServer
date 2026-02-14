@@ -17,6 +17,7 @@ local PHASE_TIMEOUT_SEC    = 5   -- 每阶段最大等待秒数
 local ABSOLUTE_TIMEOUT_SEC = 30  -- Fix #19: 绝对超时兜底(所有phase总时长上限)
 
 local phase       = 0
+local started     = false  -- BugFix BUG-5: 防重入标志
 local gates       = {}    ---@type integer[]
 local agents      = {}    ---@type integer[]
 local dbAddr      = 0     ---@type integer
@@ -125,6 +126,13 @@ end
 ---@param db integer
 ---@param cross integer|nil
 function Shutdown.execute(gateList, agentList, db, cross)
+    -- BugFix BUG-5: 防止重复调用，避免双重关闭
+    if started then
+        skynet.error("[Shutdown] already in progress, ignoring duplicate execute")
+        return
+    end
+    started = true
+
     skynet.error("[Shutdown] === graceful shutdown begin ===")
     gates     = gateList
     agents    = agentList

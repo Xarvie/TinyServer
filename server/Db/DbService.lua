@@ -36,7 +36,12 @@ local MAX_UID    = 0x7FFFFFFF  -- int32上限
 --- 实际项目应从持久化存储(redis INCR / mysql AUTO_INCREMENT)获取
 --- NOTE: 当前为内存模拟存储，重启后 byUid 为空，此函数不会生效(no-op)
 ---        替换为真实持久化后需重新验证此逻辑
+--- BugFix BUG-20: 添加 TODO 标记，防止接入真实DB时遗漏此处
 local function recoverUidCounter()
+    -- TODO(持久化): 接入真实DB后，此函数必须从持久化存储恢复uidCounter
+    --   当前内存模式下 byUid 重启后为空，以下遍历永远不会执行
+    --   接入redis时应改为: uidCounter = redis.call("GET", "uid:counter")
+    --   接入mysql时应改为: uidCounter = SELECT MAX(uid) FROM players
     local maxId = 0
     for uid, _ in pairs(byUid) do
         if type(uid) == "number" and uid > maxId then

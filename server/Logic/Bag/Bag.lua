@@ -79,6 +79,12 @@ function Bag.new(player)
     if not self.data.items then
         self.data.items = {} 
     end
+    -- BugFix BUG-4: 初始化cap默认值，防止onDbInit前访问cap为nil
+    if not self.data.cap then
+        self.data.cap = DEFAULT_CAP
+    end
+    -- BugFix BUG-3: 初始化self.items别名，防止onDbInit前访问为nil
+    self.items = self.data.items
     return self
 end
 
@@ -245,20 +251,27 @@ end
 ----------------------------------------------------------------
 
 --- 使用物品
+--- BugFix BUG-1: items[itemId] 是 table{itemId,count,expireTs}，不是 number
+---               原代码将 table 当 number 比较/运算，必 crash
+---               改为操作 item.count，并复用 removeItem 保证逻辑一致
 ---@param body table  { itemId: string, count: integer }
 function Bag:useItem(body)
     local itemId = body.itemId
-    local count = self.data.items[itemId] or 0
-    
-    if count > 0 then
-        self.data.items[itemId] = count - 1
+    local useCount = body.count or 1
+
+    local ok, reason = self:removeItem(itemId, useCount)
+    if ok then
+        -- TODO: 执行使用效果(加属性、触发buff等)
+
         -- 推送更新给客户端
         self.player:pushClient(MsgId.S2C_BagUpdate, {
             itemId = itemId,
-            count = self.data.items[itemId]
+            count  = self:getItemCount(itemId),
         })
     else
-        -- 错误处理...
+        -- 错误处理: 数量不足 / 物品不存在
+        skynet.error(string.format("[Bag] useItem failed: uid=%d itemId=%s reason=%s",
+            self.player.uid, tostring(itemId), reason))
     end
 end
 

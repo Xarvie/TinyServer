@@ -103,10 +103,13 @@ local function dispatchClientMsg(entry, msgId, body)
     end
     -- 2. 业务模块路由(O(1))
     if entry.player then
-        local handled = ModuleManager.dispatch(entry.player, msgId, body)
-        if handled then
+        -- BugFix BUG-21: dispatch 返回 (handled, modified)
+        -- 只读查询的 handler 返回 false 时 modified=false，不标记 dirty
+        local handled, modified = ModuleManager.dispatch(entry.player, msgId, body)
+        if modified then
             entry.dirty = true  -- Fix #13: 标记有数据变更
-        elseif not handled then
+        end
+        if not handled then
             skynet.error(string.format("[Agent%d] unhandled msgId=%d uid=%d",
                 agentIndex, msgId, entry.uid))
         end
@@ -134,11 +137,13 @@ function handler.init(source, cfg)
     ModuleManager.init()
 
     -- Fix #13: 周期定时存盘(每5分钟)
+    -- BugFix BUG-15: 先注册下次timeout再执行存盘，防止遍历耗时导致间隔拉长
     local SAVE_INTERVAL_SEC = 300
     local function periodicSave()
         if stopping then return end
         skynet.timeout(SAVE_INTERVAL_SEC * 100, function()
             if stopping then return end
+            periodicSave()  -- BugFix BUG-15: 先注册下一轮，再执行存盘
             local saved = 0
             for uid, entry in pairs(entries) do
                 if not entry.loading and entry.dirty then
@@ -150,7 +155,6 @@ function handler.init(source, cfg)
             if saved > 0 then
                 skynet.error(string.format("[Agent%d] periodic save: %d players", agentIndex, saved))
             end
-            periodicSave()
         end)
     end
     periodicSave()
@@ -183,6 +187,12 @@ function handler.online(source, req)
                 agentIndex, req.uid, #old.pending))
         end
         notifyCrossLeave(req.uid)  -- Fix #4
+
+        -- BugFix BUG-2: 顶号时对非loading的旧entry执行存盘，防止数据回档
+        if not old.loading then
+            Cast.send(dbAddr, "save", { uid = req.uid, data = old.data })
+        end
+
         -- 不减playerCount，同uid复用slot
     else
         playerCount = playerCount + 1

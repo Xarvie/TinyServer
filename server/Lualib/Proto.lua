@@ -9,8 +9,13 @@ local pb     = require "pb"
 ---@class Proto
 local Proto = {}
 
-local nameById = {}  ---@type table<integer, string>
-local idByName = {}  ---@type table<string, integer>
+local nameById = {}  ---@type table<integer, string>  msgId -> MsgId key name (display/debug)
+local idByName = {}  ---@type table<string, integer>  MsgId key name -> msgId
+
+-- BugFix BUG-14: 独立的 msgId -> protobuf message type name 映射
+-- 解耦 MsgId 的 key(如 "C2S_Login") 与 .proto 中的 message 名(如 "LoginReq")
+-- 未注册 proto mapping 时，fallback 到 nameById(即假设 proto name == MsgId key)
+local protoNameById = {}  ---@type table<integer, string>  msgId -> proto type name
 
 --- 注册单个协议映射
 ---@param id integer
@@ -29,6 +34,21 @@ function Proto.registerAll(msgIdTable)
     end
 end
 
+--- BugFix BUG-14: 注册 msgId -> protobuf message type name 的独立映射
+--- 若 .proto 中 message 名与 MsgId key 不同(如 "LoginReq" vs "C2S_Login")，
+--- 必须通过此函数注册，否则 pb.decode/encode 找不到类型
+--- 示例:
+---   Proto.registerProtoMapping({
+---       [1001] = "LoginReq",
+---       [1002] = "LoginResp",
+---   })
+---@param mapping table<integer, string>  msgId -> proto message type name
+function Proto.registerProtoMapping(mapping)
+    for id, protoName in pairs(mapping) do
+        protoNameById[id] = protoName
+    end
+end
+
 --- 解码客户端二进制消息 -> msgId, lua table
 ---@param data string  raw bytes
 ---@return integer|nil msgId
@@ -37,7 +57,8 @@ function Proto.decode(data)
     if #data < 2 then return nil, nil end
     local hi, lo = data:byte(1, 2)
     local msgId = hi * 256 + lo
-    local name = nameById[msgId]
+    -- BugFix BUG-14: 优先使用 proto type name 映射，fallback 到 MsgId key name
+    local name = protoNameById[msgId] or nameById[msgId]
     if not name then return msgId, nil end
     local ok, body = pcall(pb.decode, name, data:sub(3))
     if ok and body then
@@ -53,7 +74,8 @@ end
 ---@param body table
 ---@return string|nil
 function Proto.encode(msgId, body)
-    local name = nameById[msgId]
+    -- BugFix BUG-14: 优先使用 proto type name 映射，fallback 到 MsgId key name
+    local name = protoNameById[msgId] or nameById[msgId]
     if not name then return nil end
     local ok, payload = pcall(pb.encode, name, body)
     if not ok or not payload then return nil end

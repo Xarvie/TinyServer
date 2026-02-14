@@ -370,31 +370,37 @@ end
 ---@param player table
 ---@param msgId  integer
 ---@param body   table
----@return boolean handled
+---@return boolean handled   是否找到路由并执行
+---@return boolean modified  是否修改了数据(handler返回false表示只读)
 function M.dispatch(player, msgId, body)
     local route = router[msgId]
     if not route then
-        return false
+        return false, false
     end
     local mod = player[route.modName]
     if not mod then
         skynet.error(string.format(
             "[ModuleManager] dispatch: module '%s' not mounted on player %s",
             route.modName, tostring(player.uid)))
-        return false
+        return false, false
     end
     local fn = mod[route.method]
     if fn then
-        local ok, err = pcall(fn, mod, body)
+        local ok, ret = pcall(fn, mod, body)
         if not ok then
             skynet.error(string.format(
                 "[ModuleManager] dispatch error: %s.%s msgId=%d uid=%s: %s",
                 route.modName, route.method, msgId,
-                tostring(player.uid), tostring(err)))
+                tostring(player.uid), tostring(ret)))
+            -- BugFix BUG-10: handler异常时 modified=false
+            return true, false
         end
-        return true
+        -- BugFix BUG-21: handler 显式返回 false 表示只读(未修改数据)
+        -- 未返回值(nil)或返回 true 均视为有修改，向后兼容
+        local modified = (ret ~= false)
+        return true, modified
     end
-    return false
+    return false, false
 end
 
 ----------------------------------------------------------------
