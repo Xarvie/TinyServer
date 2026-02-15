@@ -39,7 +39,7 @@ local coordinator   = 0  ---@type integer
 ---@param room Room
 ---@param msgId integer
 ---@param body table
----@param excludeUid string|nil
+---@param excludeUid integer|nil
 local function broadcastRoom(room, msgId, body, excludeUid)
     for uid, member in pairs(room.members) do
         if uid ~= excludeUid then

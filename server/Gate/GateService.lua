@@ -18,15 +18,48 @@
 -- BugFix #B18: onClientMsg 检查 body 为 nil，丢弃畸形包
 -- BugFix #B19: auth同gate同uid碰撞时，gate直接踢旧fd，不依赖agent的kick
 -- BugFix #B22: shutdown 遍历时校验 session 仍存在，避免向已关闭fd写入
+-- BugFix BUG-22: 认证失败计数+超限断连，防暴力破解；未认证session不刷新活跃时间
+-- BugFix BUG-32: pendingAuth防重复login/register请求，避免双online踢线
 
 local skynet    = require "skynet"
 local socket    = require "skynet.socket"
 local websocket = require "http.websocket"
+local crypt     = require "skynet.crypt"
+local md5_core  = require "md5.core"
 local Cast      = require "Cast"
 local Dispatch  = require "Dispatch"
 local Session   = require "Session"
 local Proto     = require "Proto"
 local MsgId     = require "Proto.MsgId"
+
+----------------------------------------------------------------
+-- AuthKey验证: MD5(分钟时间戳+账号+服务器ID)
+-- 使用通用 MD5 算法(md5.core.sum)，任何语言客户端均可用标准 MD5 库生成 authkey
+----------------------------------------------------------------
+--- 生成authkey (客户端用)
+--- 示例: generateAuthKey(1704096645, "player001", 1)
+local function generateAuthKey(timestamp, account, serverId)
+    local minute = math.floor(timestamp / 60)
+    local plain = string.format("%d%s%d", minute, account, serverId)
+    return crypt.base64encode(md5_core.sum(plain))
+end
+
+--- 验证authkey (服务端)
+--- 检查当前分钟、上一分钟、下一分钟三个时间窗口
+local function verifyAuthKey(authkey, account, serverId)
+    local now = os.time()
+    local currentMinute = math.floor(now / 60)
+    
+    for offset = -1, 1 do
+        local minute = currentMinute + offset
+        local plain = string.format("%d%s%d", minute, account, serverId)
+        local expected = crypt.base64encode(md5_core.sum(plain))
+        if authkey == expected then
+            return true
+        end
+    end
+    return false
+end
 
 local gateIndex    = tonumber((...)) or 0  -- Fix #7: 确保integer
 local sessions     = Session.new()
@@ -105,25 +138,46 @@ local function onClientMsg(fd, data)
     local entry = sessions:getByFd(fd)
     if not entry then return end
 
-    -- 更新活跃时间
-    sessions:touch(fd)
-
     -- 未认证: 仅允许登录/注册
     if not entry.uid then
+        -- BugFix BUG-22: 未认证阶段不刷新活跃时间，
+        -- 使暴力破解连接可被心跳超时清理
+        -- BugFix BUG-32: 已有待处理的认证请求时忽略重复login/register，
+        -- 防止多个authResult触发重复online导致玩家被踢
+        if entry.pendingAuth then
+            return
+        end
         if msgId == MsgId.C2S_Login then
+            local Cfg = require "Config.Config"
+            local account = body.account or ""
+            local authkey = body.authkey or ""
+            
+            if not verifyAuthKey(authkey, account, Cfg.serverId) then
+                skynet.error(string.format("[Gate%d] authkey failed: fd=%d account=%s", 
+                    gateIndex, fd, account))
+                entry.authFailCount = entry.authFailCount + 1
+                entry.pendingAuth = false
+                if entry.authFailCount >= 3 then
+                    safeClose(fd)
+                end
+                return
+            end
+            
+            entry.pendingAuth = true
             Cast.send(dbAddr, "login", {
-                account   = body.account,
-                password  = body.password,
+                account   = account,
                 fd        = fd,
-                sessionId = entry.sessionId,  -- Fix #5
+                sessionId = entry.sessionId,
                 gate      = skynet.self(),
             })
         elseif msgId == MsgId.C2S_Register then
+            -- 注册仍保留原密码模式（或可改为类似逻辑）
+            entry.pendingAuth = true
             Cast.send(dbAddr, "register", {
                 account   = body.account,
                 password  = body.password,
                 fd        = fd,
-                sessionId = entry.sessionId,  -- Fix #5
+                sessionId = entry.sessionId,
                 gate      = skynet.self(),
             })
         end
@@ -132,6 +186,7 @@ local function onClientMsg(fd, data)
 
     -- 已认证: 转发给agent
     if entry.agent then
+        sessions:touch(fd)  -- BugFix BUG-22: 仅已认证session刷新活跃时间
         Cast.send(entry.agent, "clientMsg", {
             uid   = entry.uid,
             msgId = msgId,
@@ -258,7 +313,9 @@ function handler.init(source, cfg)
     heartbeatCheck = cfg.heartbeatCheck or 10
     gateIndex      = cfg.gateIndex or gateIndex  -- BugFix #B5: 同步cfg中的gateIndex
 
-    Proto.load("Proto/Game.pb")
+    -- BugFix BUG-36: 使用配置路径，消除硬编码
+    local protoFile = (cfg.protoPath or "Proto/") .. "Game.pb"
+    Proto.load(protoFile)
 
     -- 启动websocket监听
     listenFd = socket.listen("0.0.0.0", wsPort)
@@ -303,6 +360,9 @@ function handler.authResult(source, result)
         entry = sessions:getByFd(result.fd)  -- 兼容旧协议
     end
     if not entry then return end
+
+    -- BugFix BUG-32: 认证响应到达，允许客户端再次发起认证请求
+    entry.pendingAuth = false
 
     if result.code == 0 and result.uid then
         -- BugFix #B13: agents为空时拒绝认证
@@ -360,11 +420,19 @@ function handler.authResult(source, result)
         })
     else
         -- BugFix BUG-7: 认证失败仅推送错误码，不断开连接，允许客户端重试
-        -- 只在异常情况(协议违规等)才断开，密码错误/账号不存在属正常业务错误
+        -- BugFix BUG-22: 累计认证失败次数，超过阈值后主动断连，防暴力破解
+        entry.authFailCount = (entry.authFailCount or 0) + 1
         pushClient(result.fd, result.msgId, {
             code = result.code,
             uid  = 0,
         })
+        local AUTH_FAIL_LIMIT = 5
+        if entry.authFailCount >= AUTH_FAIL_LIMIT then
+            skynet.error(string.format("[Gate%d] auth fail limit reached fd=%d (%d attempts), disconnecting",
+                gateIndex, result.fd, entry.authFailCount))
+            sessions:remove(result.fd)
+            safeClose(result.fd)
+        end
     end
 end
 

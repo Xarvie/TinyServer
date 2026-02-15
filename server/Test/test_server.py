@@ -2,6 +2,12 @@
 """
 test_server.py — Skynet 游戏服务器 WebSocket 测试脚本
 
+登录认证方式: AuthKey (MD5 + 时间窗口)
+  - 客户端生成: authkey = base64(md5(floor(timestamp/60) + account + serverId))
+  - 服务端验证: 检查当前分钟、上一分钟、下一分钟三个时间窗口
+  - 有效期: ±1分钟 (约120秒窗口)
+  - 3次失败自动断连
+
 使用方法:
     python test_server.py                       # 运行全部测试 (默认 ws://127.0.0.1:9948)
     python test_server.py --host 192.168.1.10   # 指定主机
@@ -27,6 +33,8 @@ import time
 import sys
 import os
 import traceback
+import hashlib
+import base64
 
 import websockets
 
@@ -126,6 +134,18 @@ def decode(data: bytes):
     return msg_id, msg
 
 
+# ── AuthKey 生成 (MD5方案) ────────────────────────────────────
+def generate_authkey(timestamp: int, account: str, server_id: int) -> str:
+    """
+    生成authkey: base64(md5(minute + account + serverId))
+    对应服务端 GateService.lua 的 generateAuthKey 函数
+    """
+    minute = timestamp // 60
+    plain = f"{minute}{account}{server_id}"
+    md5_hash = hashlib.md5(plain.encode()).digest()
+    return base64.b64encode(md5_hash).decode()
+
+
 # ── 客户端封装 ────────────────────────────────────────────────
 class GameClient:
     """轻量 WebSocket 客户端，封装收发逻辑"""
@@ -172,8 +192,11 @@ class GameClient:
         assert msg_id == MsgId.S2C_RegisterResult, f"Expected RegisterResult, got {msg_id}"
         return msg
 
-    async def login(self, account: str, password: str):
-        await self.send(MsgId.C2S_Login, account=account, password=password)
+    async def login(self, account: str, password: str, server_id: int = 1):
+        """登录 (使用authkey认证)"""
+        timestamp = int(time.time())
+        authkey = generate_authkey(timestamp, account, server_id)
+        await self.send(MsgId.C2S_Login, account=account, authkey=authkey)
         msg_id, msg = await self.recv()
         assert msg_id == MsgId.S2C_LoginResult, f"Expected LoginResult, got {msg_id}"
         if msg.code == 0:
@@ -211,51 +234,52 @@ def fail(msg: str):
 # ── 测试用例 ──────────────────────────────────────────────────
 
 async def test_register(uri: str):
-    """测试注册流程"""
-    section("TEST: Register")
-    c = GameClient(uri, "Register")
+    """测试首次登录自动注册"""
+    section("TEST: Auto Register on First Login")
+    c = GameClient(uri, "AutoReg")
     try:
         await c.connect()
 
-        # 1) 注册新账号
+        # 首次登录自动注册
         account = f"testuser_{int(time.time())}"
-        result = await c.register(account, "pass123")
-        assert result.code == 0, f"Register failed with code {result.code}"
+        result = await c.login(account, "")
+        assert result.code == 0, f"Auto register failed with code {result.code}"
         assert result.uid > 0, f"Invalid uid: {result.uid}"
-        ok(f"注册成功: account={account}, uid={result.uid}")
+        ok(f"首次登录自动注册成功: account={account}, uid={result.uid}")
 
     except Exception as e:
-        fail(f"注册测试失败: {e}")
+        fail(f"自动注册测试失败: {e}")
         traceback.print_exc()
     finally:
         await c.close()
 
 
 async def test_register_duplicate(uri: str):
-    """测试重复注册"""
-    section("TEST: Register Duplicate")
+    """测试重复登录（同一账号）"""
+    section("TEST: Login Same Account Twice")
     account = f"dup_user_{int(time.time())}"
 
-    c1 = GameClient(uri, "Reg1")
+    c1 = GameClient(uri, "First")
     try:
         await c1.connect()
-        result = await c1.register(account, "pass123")
+        result = await c1.login(account, "")
         assert result.code == 0
-        ok(f"首次注册成功: uid={result.uid}")
+        uid1 = result.uid
+        ok(f"首次登录: uid={uid1}")
     finally:
         await c1.close()
 
-    # 注册成功后 gate 会断开连接(认证失败场景), 重新连接再试
     await asyncio.sleep(0.3)
 
-    c2 = GameClient(uri, "Reg2")
+    c2 = GameClient(uri, "Second")
     try:
         await c2.connect()
-        result = await c2.register(account, "pass456")
-        assert result.code == 3, f"Expected code=3 (duplicate), got {result.code}"
-        ok("重复注册正确返回 code=3")
+        result = await c2.login(account, "")
+        assert result.code == 0
+        assert result.uid == uid1, f"UID不一致: {result.uid} vs {uid1}"
+        ok(f"再次登录成功: uid={result.uid} (UID一致)")
     except Exception as e:
-        fail(f"重复注册测试失败: {e}")
+        fail(f"重复登录测试失败: {e}")
         traceback.print_exc()
     finally:
         await c2.close()
@@ -266,27 +290,27 @@ async def test_login(uri: str):
     section("TEST: Login")
     account = f"login_user_{int(time.time())}"
 
-    # 先注册
-    c1 = GameClient(uri, "RegFirst")
+    # 直接登录（首次自动注册）
+    c1 = GameClient(uri, "Login1")
     try:
         await c1.connect()
-        reg = await c1.register(account, "mypass")
-        assert reg.code == 0
-        uid = reg.uid
-        ok(f"注册完成: uid={uid}")
+        result = await c1.login(account, "")
+        assert result.code == 0, f"Login failed: code={result.code}"
+        uid = result.uid
+        ok(f"首次登录: uid={uid}")
     finally:
         await c1.close()
 
     await asyncio.sleep(0.3)
 
-    # 登录
-    c2 = GameClient(uri, "Login")
+    # 再次登录（应返回相同uid）
+    c2 = GameClient(uri, "Login2")
     try:
         await c2.connect()
-        result = await c2.login(account, "mypass")
+        result = await c2.login(account, "")
         assert result.code == 0, f"Login failed: code={result.code}"
         assert result.uid == uid, f"UID mismatch: expected {uid}, got {result.uid}"
-        ok(f"登录成功: uid={result.uid}")
+        ok(f"再次登录成功: uid={result.uid}")
     except Exception as e:
         fail(f"登录测试失败: {e}")
         traceback.print_exc()
@@ -295,42 +319,55 @@ async def test_login(uri: str):
 
 
 async def test_login_wrong_password(uri: str):
-    """测试错误密码"""
-    section("TEST: Login Wrong Password")
-    account = f"wrong_pw_{int(time.time())}"
+    """测试错误authkey (使用错误的account生成)"""
+    section("TEST: Login Wrong AuthKey")
+    account = f"authkey_test_{int(time.time())}"
 
-    c1 = GameClient(uri, "RegWP")
+    # 先用正确authkey登录
+    c1 = GameClient(uri, "CorrectAK")
     try:
         await c1.connect()
-        reg = await c1.register(account, "correct")
-        assert reg.code == 0
+        result = await c1.login(account, "")
+        assert result.code == 0
+        ok(f"正确authkey登录成功: uid={result.uid}")
     finally:
         await c1.close()
 
     await asyncio.sleep(0.3)
 
-    c2 = GameClient(uri, "WrongPW")
+    c2 = GameClient(uri, "WrongAK")
     try:
         await c2.connect()
-        result = await c2.login(account, "wrong_password")
-        assert result.code == 2, f"Expected code=2 (wrong password), got {result.code}"
-        ok("错误密码正确返回 code=2")
+        # 使用错误的account生成authkey (故意不匹配)
+        timestamp = int(time.time())
+        wrong_authkey = generate_authkey(timestamp, "wrong_account", 1)
+        await c2.send(MsgId.C2S_Login, account=account, authkey=wrong_authkey)
+        
+        # authkey验证失败，gate会关闭连接或不回复
+        msg_id, msg = await c2.recv_optional(timeout=2.0)
+        if msg_id is None:
+            ok("错误authkey导致连接关闭(符合预期)")
+        elif msg_id == MsgId.S2C_LoginResult and msg.code != 0:
+            ok(f"错误authkey正确返回错误码: code={msg.code}")
+        else:
+            fail(f"错误authkey未被拒绝: msgId={msg_id}")
     except Exception as e:
-        fail(f"错误密码测试失败: {e}")
+        fail(f"错误authkey测试失败: {e}")
         traceback.print_exc()
     finally:
         await c2.close()
 
 
 async def test_login_nonexistent(uri: str):
-    """测试不存在的账号"""
-    section("TEST: Login Nonexistent Account")
-    c = GameClient(uri, "NoAcct")
+    """测试不存在账号（现在会自动注册）"""
+    section("TEST: Login Nonexistent Account (Auto Register)")
+    c = GameClient(uri, "NewAcc")
     try:
         await c.connect()
-        result = await c.login(f"no_such_account_{time.time()}", "whatever")
-        assert result.code == 1, f"Expected code=1 (not found), got {result.code}"
-        ok("不存在账号正确返回 code=1")
+        account = f"no_such_account_{int(time.time())}"
+        result = await c.login(account, "")
+        assert result.code == 0, f"Expected code=0 (auto register), got {result.code}"
+        ok(f"不存在账号自动注册成功: uid={result.uid}")
     except Exception as e:
         fail(f"不存在账号测试失败: {e}")
         traceback.print_exc()
@@ -343,21 +380,11 @@ async def test_heartbeat(uri: str):
     section("TEST: Heartbeat (Ping/Pong)")
     account = f"hb_user_{int(time.time())}"
 
-    # 注册+登录
+    # 登录（自动注册）
     c = GameClient(uri, "HB")
     try:
         await c.connect()
-        reg = await c.register(account, "pass")
-        assert reg.code == 0
-    finally:
-        await c.close()
-
-    await asyncio.sleep(0.3)
-
-    c = GameClient(uri, "HB")
-    try:
-        await c.connect()
-        result = await c.login(account, "pass")
+        result = await c.login(account, "")
         assert result.code == 0
 
         # 发送3次心跳
@@ -404,23 +431,11 @@ async def test_reconnect(uri: str):
     section("TEST: Reconnect / Kick Duplicate Login")
     account = f"recon_user_{int(time.time())}"
 
-    # 注册
-    c0 = GameClient(uri, "RegRecon")
-    try:
-        await c0.connect()
-        reg = await c0.register(account, "pass")
-        assert reg.code == 0
-        uid = reg.uid
-    finally:
-        await c0.close()
-
-    await asyncio.sleep(0.3)
-
-    # 第一次登录
+    # 第一次登录（自动注册）
     c1 = GameClient(uri, "Old")
     try:
         await c1.connect()
-        r1 = await c1.login(account, "pass")
+        r1 = await c1.login(account, "")
         assert r1.code == 0
         ok(f"第一次登录成功: uid={r1.uid}")
 
@@ -428,7 +443,7 @@ async def test_reconnect(uri: str):
         c2 = GameClient(uri, "New")
         try:
             await c2.connect()
-            r2 = await c2.login(account, "pass")
+            r2 = await c2.login(account, "")
             assert r2.code == 0
             ok(f"第二次登录成功: uid={r2.uid}")
 
@@ -472,16 +487,7 @@ async def test_stress(uri: str, count: int = 20):
         c = GameClient(uri, f"S{index:03d}")
         try:
             await c.connect()
-            reg = await c.register(account, "p")
-            if reg.code != 0:
-                results["fail"] += 1
-                return
-            await c.close()
-
-            await asyncio.sleep(0.1)
-
-            await c.connect()
-            login = await c.login(account, "p")
+            login = await c.login(account, "")
             if login.code != 0:
                 results["fail"] += 1
                 return
@@ -516,21 +522,10 @@ async def test_join_room(uri: str):
     section("TEST: Join Room")
     account = f"room_user_{int(time.time())}"
 
-    # 注册
-    c0 = GameClient(uri, "RegRoom")
-    try:
-        await c0.connect()
-        reg = await c0.register(account, "pass")
-        assert reg.code == 0
-    finally:
-        await c0.close()
-
-    await asyncio.sleep(0.3)
-
     c = GameClient(uri, "Room")
     try:
         await c.connect()
-        result = await c.login(account, "pass")
+        result = await c.login(account, "")
         assert result.code == 0
         ok(f"登录成功: uid={result.uid}")
 
@@ -555,9 +550,31 @@ async def test_join_room(uri: str):
         await c.close()
 
 
+async def test_authkey_demo(uri: str):
+    """演示authkey生成和使用"""
+    section("TEST: AuthKey Demo")
+    
+    timestamp = int(time.time())
+    account = "player001"
+    server_id = 1
+    
+    authkey = generate_authkey(timestamp, account, server_id)
+    minute = timestamp // 60
+    
+    print(f"  AuthKey生成演示:")
+    print(f"    timestamp  = {timestamp}")
+    print(f"    minute     = {minute} (floor(timestamp/60))")
+    print(f"    account    = {account}")
+    print(f"    serverId   = {server_id}")
+    print(f"    plain      = {minute}{account}{server_id}")
+    print(f"    authkey    = {authkey}")
+    ok("AuthKey生成示例完成")
+
+
 # ── 测试编排 ──────────────────────────────────────────────────
 
 TEST_REGISTRY = {
+    "authkey":      [test_authkey_demo],
     "register":     [test_register, test_register_duplicate],
     "login":        [test_login, test_login_wrong_password, test_login_nonexistent],
     "heartbeat":    [test_heartbeat, test_heartbeat_before_login],

@@ -1,15 +1,16 @@
 
-ø
-Proto/Game.proto"A
+î
+
+Game.proto"?
 	C2S_Login
-account (	Raccount
-password (	Rpassword"7
+account (	Raccount
+authkey (	Rauthkey"7
 S2C_LoginResult
 code (Rcode
-uid (Ruid"D
+uid (Ruid"B
 C2S_Register
-account (	Raccount
-password (	Rpassword":
+account (	Raccount
+authkey (	Rauthkey":
 S2C_RegisterResult
 code (Rcode
 uid (Ruid"

@@ -5,7 +5,7 @@
 -- 目录结构: logic/bag/Bag.lua
 -- 自动发现: ModuleManager.scan 检测到 bag/ 目录下的 Bag.lua(同名匹配)
 --
--- 持久化数据结构 (entry.data.bag):
+-- 持久化数据结构 (entry.data.Bag):
 --   items: table<string, BagItem>  物品表(itemId -> item)
 --   cap:   integer                 背包容量
 --
@@ -27,7 +27,7 @@ local MsgId  = require "Proto.MsgId"
 
 ---@class Bag
 ---@field player   Player       业务上下文
----@field data     table        持久化数据段引用(player:getModData("bag"))
+---@field data     table        持久化数据段引用(player:getModData(Bag.modName))
 ---@field items    table        物品数据(引用 data.items，便捷别名)
 ---  BugFix BUG-4: 移除 self.cap 字段，cap 统一通过 self.data.cap 读写
 ---                number 赋值是拷贝而非引用，保留独立字段会产生双源不一致风险
@@ -74,7 +74,8 @@ function Bag.new(player)
         player = player,
     }, Bag)
     -- 获取该模块专属的持久化数据引用
-    self.data = player:getModData("bag") 
+    -- BugFix BUG-34: 使用 modName 作为 data key，与约定一致
+    self.data = player:getModData(Bag.modName)
     -- 如果数据段是空的，初始化默认值
     if not self.data.items then
         self.data.items = {} 
@@ -96,7 +97,8 @@ end
 --- 数据库数据加载完毕，从持久化数据恢复内存状态
 --- 此时所有依赖模块的 onDbInit 已完成(拓扑序保证)
 function Bag:onDbInit()
-    local data = self.player:getModData("bag")
+    -- BugFix BUG-34: 统一使用 modName 作为 data key
+    local data = self.player:getModData(self.modName)
 
     -- 初始化默认结构(新玩家 / 数据迁移)
     if not data.items then
@@ -151,7 +153,7 @@ end
 ---@field expireTs integer  过期时间戳(0=永不过期)
 
 --- 添加物品
---- 示例API: 供其他模块调用(如: player.bag:addItem("item_001", 10))
+--- 示例API: 供其他模块调用(如: player.Bag:addItem("item_001", 10))
 ---@param itemId string  物品ID
 ---@param count  integer 数量(>0)
 ---@return boolean ok
@@ -259,6 +261,20 @@ function Bag:useItem(body)
     local itemId = body.itemId
     local useCount = body.count or 1
 
+    -- BugFix BUG-23: 校验 itemId，防止畸形包导致无意义的错误日志
+    if not itemId or type(itemId) ~= "string" or #itemId == 0 then
+        skynet.error(string.format("[Bag] useItem rejected: uid=%d invalid itemId",
+            self.player.uid))
+        return false
+    end
+
+    -- BugFix BUG-33: 校验 count 类型，防止字符串与数字比较崩溃
+    if type(useCount) ~= "number" or useCount <= 0 then
+        skynet.error(string.format("[Bag] useItem rejected: uid=%d invalid count=%s",
+            self.player.uid, tostring(useCount)))
+        return false
+    end
+
     local ok, reason = self:removeItem(itemId, useCount)
     if ok then
         -- TODO: 执行使用效果(加属性、触发buff等)
@@ -269,9 +285,11 @@ function Bag:useItem(body)
             count  = self:getItemCount(itemId),
         })
     else
-        -- 错误处理: 数量不足 / 物品不存在
+        -- BugFix BUG-35: 返回false告知ModuleManager此操作未修改数据，
+        -- 避免无意义的dirty标记和存盘开销
         skynet.error(string.format("[Bag] useItem failed: uid=%d itemId=%s reason=%s",
             self.player.uid, tostring(itemId), reason))
+        return false
     end
 end
 

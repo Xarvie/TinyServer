@@ -19,6 +19,9 @@
 --   BugFix #B16: kick请求携带uid
 --   BugFix #B17: pending回放中检测player已被移除则中断
 --   BugFix #B21: handler.init中同步agentIndex
+--   BugFix BUG-24: containerMsgIds改为查表驱动，消除死代码
+--   BugFix BUG-25: 添加C2S_Logout容器级处理，触发正常离线流程
+--   BugFix BUG-26: pending队列上限，防止loading期间OOM
 
 local skynet         = require "skynet"
 local Cast           = require "Cast"
@@ -54,6 +57,7 @@ local globalLoadSeq = 0
 local entries     = {}  ---@type table<integer, PlayerEntry>
 local playerCount = 0
 local stopping    = false  -- Fix #13: 定时存盘在shutdown后停止
+local MAX_PENDING = 100   -- BugFix BUG-26: pending队列上限，防OOM
 
 ----------------------------------------------------------------
 -- 通知Cross清理玩家(Fix #4)
@@ -67,11 +71,47 @@ local function notifyCrossLeave(uid)
 end
 
 ----------------------------------------------------------------
--- 容器级客户端消息处理(心跳等不走业务模块)
+-- 容器级客户端消息处理(心跳、登出等不走业务模块)
+-- BugFix BUG-24: 改为查表驱动，containerMsgIds 表不再是死代码
+-- BugFix BUG-25: 添加 C2S_Logout 处理，触发正常离线流程
 ----------------------------------------------------------------
----@type table<integer, true>
-local containerMsgIds = {
-    [MsgId.C2S_Ping] = true,
+
+---@type table<integer, fun(entry: PlayerEntry, body: table): boolean>
+local containerMsgHandlers = {
+    [MsgId.C2S_Ping] = function(entry, body)
+        Cast.send(entry.gate, "push", {
+            fd    = entry.fd,
+            msgId = MsgId.S2C_Pong,
+            body  = { timestamp = body.timestamp },
+        })
+        return true
+    end,
+
+    --- BugFix BUG-25: C2S_Logout 触发正常离线流程
+    [MsgId.C2S_Logout] = function(entry, body)
+        -- 触发登出钩子(逆序)
+        if entry.player then
+            ModuleManager.triggerReverse("onLogout", entry.player)
+            ModuleManager.unmount(entry.player)
+            entry.player:destroy()
+            entry.player = nil
+        end
+        notifyCrossLeave(entry.uid)
+
+        -- 存盘
+        if not entry.loading then
+            Cast.send(dbAddr, "save", { uid = entry.uid, data = entry.data })
+        end
+
+        -- 通知gate踢下线(reason=0 正常登出)
+        Cast.send(entry.gate, "kick", { fd = entry.fd, uid = entry.uid, reason = 0 })
+
+        -- 清理entry
+        entries[entry.uid] = nil
+        playerCount = playerCount - 1
+        skynet.error(string.format("[Agent%d] player logout: %d", agentIndex, entry.uid))
+        return true
+    end,
 }
 
 ---@param entry PlayerEntry
@@ -79,13 +119,9 @@ local containerMsgIds = {
 ---@param body  table
 ---@return boolean handled
 local function handleContainerMsg(entry, msgId, body)
-    if msgId == MsgId.C2S_Ping then
-        Cast.send(entry.gate, "push", {
-            fd    = entry.fd,
-            msgId = MsgId.S2C_Pong,
-            body  = { timestamp = body.timestamp },
-        })
-        return true
+    local handler_fn = containerMsgHandlers[msgId]
+    if handler_fn then
+        return handler_fn(entry, body)
     end
     return false
 end
@@ -327,6 +363,13 @@ function handler.clientMsg(source, req)
             return
         end
         if entry.pending then
+            -- BugFix BUG-26: pending队列上限，防止loading耗时长时OOM
+            if #entry.pending >= MAX_PENDING then
+                skynet.error(string.format(
+                    "[Agent%d] pending queue full for uid=%d, dropping msgId=%d",
+                    agentIndex, req.uid, req.msgId))
+                return
+            end
             entry.pending[#entry.pending + 1] = {
                 msgId = req.msgId,
                 body  = req.body,

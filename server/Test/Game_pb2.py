@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nGame.proto\".\n\tC2S_Login\x12\x0f\n\x07\x61\x63\x63ount\x18\x01 \x01(\t\x12\x10\n\x08password\x18\x02 \x01(\t\",\n\x0fS2C_LoginResult\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0b\n\x03uid\x18\x02 \x01(\x05\"1\n\x0c\x43\x32S_Register\x12\x0f\n\x07\x61\x63\x63ount\x18\x01 \x01(\t\x12\x10\n\x08password\x18\x02 \x01(\t\"/\n\x12S2C_RegisterResult\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0b\n\x03uid\x18\x02 \x01(\x05\"\x0c\n\nC2S_Logout\"\x1a\n\x08S2C_Kick\x12\x0e\n\x06reason\x18\x01 \x01(\x05\"\x1e\n\x0c\x43\x32S_JoinRoom\x12\x0e\n\x06roomId\x18\x01 \x01(\t\".\n\x0eS2C_JoinResult\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0e\n\x06roomId\x18\x02 \x01(\t\"5\n\x0e\x43\x32S_RoomAction\x12\x12\n\nactionType\x18\x01 \x01(\x05\x12\x0f\n\x07payload\x18\x02 \x01(\t\" \n\x0cS2C_RoomSync\x12\x10\n\x08snapshot\x18\x01 \x01(\t\",\n\x0b\x43\x32S_UseItem\x12\x0e\n\x06itemId\x18\x01 \x01(\x05\x12\r\n\x05\x63ount\x18\x02 \x01(\x05\".\n\rS2C_BagUpdate\x12\x0e\n\x06itemId\x18\x01 \x01(\x05\x12\r\n\x05\x63ount\x18\x02 \x01(\x05\"\x1d\n\x08\x43\x32S_Ping\x12\x11\n\ttimestamp\x18\x01 \x01(\x03\"\x1d\n\x08S2C_Pong\x12\x11\n\ttimestamp\x18\x01 \x01(\x03\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nGame.proto\"-\n\tC2S_Login\x12\x0f\n\x07\x61\x63\x63ount\x18\x01 \x01(\t\x12\x0f\n\x07\x61uthkey\x18\x02 \x01(\t\",\n\x0fS2C_LoginResult\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0b\n\x03uid\x18\x02 \x01(\x05\"0\n\x0c\x43\x32S_Register\x12\x0f\n\x07\x61\x63\x63ount\x18\x01 \x01(\t\x12\x0f\n\x07\x61uthkey\x18\x02 \x01(\t\"/\n\x12S2C_RegisterResult\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0b\n\x03uid\x18\x02 \x01(\x05\"\x0c\n\nC2S_Logout\"\x1a\n\x08S2C_Kick\x12\x0e\n\x06reason\x18\x01 \x01(\x05\"\x1e\n\x0c\x43\x32S_JoinRoom\x12\x0e\n\x06roomId\x18\x01 \x01(\t\".\n\x0eS2C_JoinResult\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0e\n\x06roomId\x18\x02 \x01(\t\"5\n\x0e\x43\x32S_RoomAction\x12\x12\n\nactionType\x18\x01 \x01(\x05\x12\x0f\n\x07payload\x18\x02 \x01(\t\" \n\x0cS2C_RoomSync\x12\x10\n\x08snapshot\x18\x01 \x01(\t\",\n\x0b\x43\x32S_UseItem\x12\x0e\n\x06itemId\x18\x01 \x01(\x05\x12\r\n\x05\x63ount\x18\x02 \x01(\x05\".\n\rS2C_BagUpdate\x12\x0e\n\x06itemId\x18\x01 \x01(\x05\x12\r\n\x05\x63ount\x18\x02 \x01(\x05\"\x1d\n\x08\x43\x32S_Ping\x12\x11\n\ttimestamp\x18\x01 \x01(\x03\"\x1d\n\x08S2C_Pong\x12\x11\n\ttimestamp\x18\x01 \x01(\x03\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,31 +32,31 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'Game_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_C2S_LOGIN']._serialized_start=14
-  _globals['_C2S_LOGIN']._serialized_end=60
-  _globals['_S2C_LOGINRESULT']._serialized_start=62
-  _globals['_S2C_LOGINRESULT']._serialized_end=106
-  _globals['_C2S_REGISTER']._serialized_start=108
-  _globals['_C2S_REGISTER']._serialized_end=157
-  _globals['_S2C_REGISTERRESULT']._serialized_start=159
-  _globals['_S2C_REGISTERRESULT']._serialized_end=206
-  _globals['_C2S_LOGOUT']._serialized_start=208
-  _globals['_C2S_LOGOUT']._serialized_end=220
-  _globals['_S2C_KICK']._serialized_start=222
-  _globals['_S2C_KICK']._serialized_end=248
-  _globals['_C2S_JOINROOM']._serialized_start=250
-  _globals['_C2S_JOINROOM']._serialized_end=280
-  _globals['_S2C_JOINRESULT']._serialized_start=282
-  _globals['_S2C_JOINRESULT']._serialized_end=328
-  _globals['_C2S_ROOMACTION']._serialized_start=330
-  _globals['_C2S_ROOMACTION']._serialized_end=383
-  _globals['_S2C_ROOMSYNC']._serialized_start=385
-  _globals['_S2C_ROOMSYNC']._serialized_end=417
-  _globals['_C2S_USEITEM']._serialized_start=419
-  _globals['_C2S_USEITEM']._serialized_end=463
-  _globals['_S2C_BAGUPDATE']._serialized_start=465
-  _globals['_S2C_BAGUPDATE']._serialized_end=511
-  _globals['_C2S_PING']._serialized_start=513
-  _globals['_C2S_PING']._serialized_end=542
-  _globals['_S2C_PONG']._serialized_start=544
-  _globals['_S2C_PONG']._serialized_end=573
+  _globals['_C2S_LOGIN']._serialized_end=59
+  _globals['_S2C_LOGINRESULT']._serialized_start=61
+  _globals['_S2C_LOGINRESULT']._serialized_end=105
+  _globals['_C2S_REGISTER']._serialized_start=107
+  _globals['_C2S_REGISTER']._serialized_end=155
+  _globals['_S2C_REGISTERRESULT']._serialized_start=157
+  _globals['_S2C_REGISTERRESULT']._serialized_end=204
+  _globals['_C2S_LOGOUT']._serialized_start=206
+  _globals['_C2S_LOGOUT']._serialized_end=218
+  _globals['_S2C_KICK']._serialized_start=220
+  _globals['_S2C_KICK']._serialized_end=246
+  _globals['_C2S_JOINROOM']._serialized_start=248
+  _globals['_C2S_JOINROOM']._serialized_end=278
+  _globals['_S2C_JOINRESULT']._serialized_start=280
+  _globals['_S2C_JOINRESULT']._serialized_end=326
+  _globals['_C2S_ROOMACTION']._serialized_start=328
+  _globals['_C2S_ROOMACTION']._serialized_end=381
+  _globals['_S2C_ROOMSYNC']._serialized_start=383
+  _globals['_S2C_ROOMSYNC']._serialized_end=415
+  _globals['_C2S_USEITEM']._serialized_start=417
+  _globals['_C2S_USEITEM']._serialized_end=461
+  _globals['_S2C_BAGUPDATE']._serialized_start=463
+  _globals['_S2C_BAGUPDATE']._serialized_end=509
+  _globals['_C2S_PING']._serialized_start=511
+  _globals['_C2S_PING']._serialized_end=540
+  _globals['_S2C_PONG']._serialized_start=542
+  _globals['_S2C_PONG']._serialized_end=571
 # @@protoc_insertion_point(module_scope)

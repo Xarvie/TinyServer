@@ -39,8 +39,8 @@ local router = {}
 ---@type boolean  是否已完成init
 local initialized = false
 
---- 标准生命周期钩子名(按典型调用时序排列，仅做文档用途)
---- 模块可实现其中任意子集，管理器按sortedNames顺序调用
+--- 标准生命周期钩子名(按典型调用时序排列)
+--- BugFix BUG-37: 同时维护列表(导出用)和集合(校验用)
 local LIFECYCLE_HOOKS = {
     "onDbInit",       -- 数据库数据加载完毕(data已挂载到entry)
     "onPlayerLogin",  -- 所有模块onDbInit完成后，玩家正式上线
@@ -50,6 +50,12 @@ local LIFECYCLE_HOOKS = {
     "onLogout",       -- 玩家登出/离线前(存盘前)
     "onShutdown",     -- 服务关闭前
 }
+
+---@type table<string, true>
+local LIFECYCLE_HOOK_SET = {}
+for _, name in ipairs(LIFECYCLE_HOOKS) do
+    LIFECYCLE_HOOK_SET[name] = true
+end
 
 ----------------------------------------------------------------
 -- 1. 模块注册
@@ -412,6 +418,11 @@ end
 ---@param ...    any
 function M.trigger(event, player, ...)
     assert(initialized, "[ModuleManager] must call init() before trigger()")
+    -- BugFix BUG-37: 校验钩子名是否在标准列表中，防拼写错误
+    if not LIFECYCLE_HOOK_SET[event] then
+        skynet.error(string.format(
+            "[ModuleManager] WARNING: trigger unknown hook '%s', check for typo", event))
+    end
     for _, modName in ipairs(sortedNames) do
         local mod = player[modName]
         if mod then
@@ -433,6 +444,11 @@ end
 ---@param ...    any
 function M.triggerReverse(event, player, ...)
     assert(initialized, "[ModuleManager] must call init() before triggerReverse()")
+    -- BugFix BUG-37: 校验钩子名是否在标准列表中
+    if not LIFECYCLE_HOOK_SET[event] then
+        skynet.error(string.format(
+            "[ModuleManager] WARNING: triggerReverse unknown hook '%s', check for typo", event))
+    end
     for i = #sortedNames, 1, -1 do
         local modName = sortedNames[i]
         local mod = player[modName]

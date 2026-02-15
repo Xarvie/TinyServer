@@ -4,7 +4,7 @@
 --
 -- 职责:
 --   1. 封装对 entry 底层字段的访问(fd/gate/data等)
---   2. 提供通用工具方法(pushClient/kick/rebind)
+--   2. 提供通用工具方法(pushClient/kick)
 --   3. 作为模块间相互访问的中介(player.Bag / player.Role)
 --
 -- 设计约束:
@@ -44,21 +44,6 @@ function Player:destroy()
 end
 
 ----------------------------------------------------------------
--- 连接管理
-----------------------------------------------------------------
-
---- 更新连接信息(断线重连/顶号后)
----@param fd   integer  新的文件描述符
----@param gate integer  新的gate地址
-function Player:rebind(fd, gate)
-    self.fd   = fd
-    self.gate = gate
-    -- 同步回entry(AgentService持有的原始数据)
-    self.entry.fd   = fd
-    self.entry.gate = gate
-end
-
-----------------------------------------------------------------
 -- 客户端通信
 ----------------------------------------------------------------
 
@@ -88,17 +73,21 @@ end
 ----------------------------------------------------------------
 
 --- 获取玩家持久化数据根表(直接引用)
----@return table
+--- BugFix BUG-30: destroy后调用返回nil而非崩溃
+---@return table|nil
 function Player:getData()
+    if not self.entry then return nil end
     return self.entry.data
 end
 
 --- 获取/初始化指定模块的数据段
 --- 约定: entry.data[modName] 为该模块的持久化数据
 --- 首次访问时自动创建空表
+--- BugFix BUG-30: destroy后调用返回nil而非崩溃
 ---@param modName string  模块名
----@return table  该模块的数据段(引用)
+---@return table|nil  该模块的数据段(引用)
 function Player:getModData(modName)
+    if not self.entry then return nil end
     local data = self.entry.data
     if not data[modName] then
         data[modName] = {}

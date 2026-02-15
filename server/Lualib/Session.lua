@@ -17,6 +17,8 @@ local skynet = require "skynet"
 ---@field agent integer|nil
 ---@field gate integer
 ---@field lastActive integer  最后活跃时间(centisecond, skynet.now()原始值)
+---@field authFailCount integer  认证失败计数(BugFix BUG-22)
+---@field pendingAuth boolean    是否有待处理的认证请求(BugFix BUG-32)
 
 ---@class SessionMgr
 local SessionMgr = {}
@@ -25,7 +27,7 @@ SessionMgr.__index = SessionMgr
 function SessionMgr.new()
     local self = setmetatable({}, SessionMgr)
     self.byFd    = {}  ---@type table<integer, SessionEntry>
-    self.byUid   = {}  ---@type table<string, SessionEntry>
+    self.byUid   = {}  ---@type table<integer, SessionEntry>
     self._count  = 0   -- Fix #8: O(1) 计数
     self._nextId = 0   -- Fix #5: sessionId 生成器
     return self
@@ -41,12 +43,14 @@ function SessionMgr:bind(fd, gate)
     end
     self._nextId = self._nextId + 1
     local entry = {
-        fd         = fd,
-        sessionId  = self._nextId,  -- Fix #5
-        uid        = nil,
-        agent      = nil,
-        gate       = gate,
-        lastActive = skynet.now(),  -- BugFix #B7: 直接存centisecond
+        fd            = fd,
+        sessionId     = self._nextId,  -- Fix #5
+        uid           = nil,
+        agent         = nil,
+        gate          = gate,
+        lastActive    = skynet.now(),  -- BugFix #B7: 直接存centisecond
+        authFailCount = 0,             -- BugFix BUG-22: 认证失败计数，防暴力破解
+        pendingAuth   = false,          -- BugFix BUG-32: 防重复login/register请求
     }
     self.byFd[fd] = entry
     self._count = self._count + 1
