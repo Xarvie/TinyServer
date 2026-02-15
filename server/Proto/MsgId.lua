@@ -6,8 +6,6 @@ local MsgId = {
     -- 认证
     C2S_Login       = 1001,
     S2C_LoginResult = 1002,
-    C2S_Register    = 1003,
-    S2C_RegisterResult = 1004,
 
     -- 玩家
     C2S_Logout      = 1101,

@@ -142,7 +142,7 @@ local function onClientMsg(fd, data)
     if not entry.uid then
         -- BugFix BUG-22: 未认证阶段不刷新活跃时间，
         -- 使暴力破解连接可被心跳超时清理
-        -- BugFix BUG-32: 已有待处理的认证请求时忽略重复login/register，
+        -- BugFix BUG-32: 已有待处理的认证请求时忽略重复login，
         -- 防止多个authResult触发重复online导致玩家被踢
         if entry.pendingAuth then
             return
@@ -166,16 +166,6 @@ local function onClientMsg(fd, data)
             entry.pendingAuth = true
             Cast.send(dbAddr, "login", {
                 account   = account,
-                fd        = fd,
-                sessionId = entry.sessionId,
-                gate      = skynet.self(),
-            })
-        elseif msgId == MsgId.C2S_Register then
-            -- 注册仍保留原密码模式（或可改为类似逻辑）
-            entry.pendingAuth = true
-            Cast.send(dbAddr, "register", {
-                account   = body.account,
-                password  = body.password,
                 fd        = fd,
                 sessionId = entry.sessionId,
                 gate      = skynet.self(),

@@ -4,7 +4,7 @@
 -- 持久化: MongoDB (skynet.db.mongo)
 --
 -- MongoDB 集合设计:
---   accounts:   { _id: string(account), password: string, uid: integer }
+--   accounts:   { _id: string(account), uid: integer }  (authkey模式，无password)
 --   players:    { _id: integer(uid), data: table }
 --   id_counter: { _id: integer(serverId), cur: integer(playerId天花板) }
 --
@@ -207,7 +207,6 @@ function handler.login(source, req)
     local insertOk = safeMongo("login.autoRegister", function()
         db.accounts:insert({
             _id  = req.account,
-            password = "",  -- authkey模式无密码
             uid  = uid,
         })
     end)
@@ -245,73 +244,6 @@ function handler.login(source, req)
         msgId     = MsgId.S2C_LoginResult,
     })
     skynet.error(string.format("[DB] auto register ok: %s -> uid=%d (server=%d player=%d)",
-        req.account, uid, uid >> 13, uid & 0x1FFF))
-end
-
---- 注册(gate cast 过来)
---- uid 由 IdService 分配(call)
----@param source integer
----@param req table  { account, password, fd, sessionId, gate }
-function handler.register(source, req)
-    -- 1. 快速检查
-    local ok, existing = safeMongo("register.check", function()
-        return db.accounts:findOne({ _id = req.account })
-    end)
-    if not ok then
-        Cast.send(req.gate, "authResult", {
-            fd = req.fd, sessionId = req.sessionId,
-            code = 4, uid = nil, msgId = MsgId.S2C_RegisterResult,
-        })
-        return
-    end
-    if existing then
-        Cast.send(req.gate, "authResult", {
-            fd = req.fd, sessionId = req.sessionId,
-            code = 3, uid = nil, msgId = MsgId.S2C_RegisterResult,
-        })
-        return
-    end
-
-    -- 2. 向 IdService 申请 uid (skynet.call — 全服唯一的 call 调用点)
-    local callOk, uid = pcall(skynet.call, idAddr, "lua", "allocUid")
-    if not callOk then
-        skynet.error(string.format("[DB] register allocUid failed: %s", tostring(uid)))
-        Cast.send(req.gate, "authResult", {
-            fd = req.fd, sessionId = req.sessionId,
-            code = 4, uid = nil, msgId = MsgId.S2C_RegisterResult,
-        })
-        return
-    end
-
-    -- 3. 插入账号(_id 唯一约束兜底并发竞态)
-    local insertOk = safeMongo("register.insert", function()
-        db.accounts:insert({
-            _id      = req.account,
-            password = req.password,
-            uid      = uid,
-        })
-    end)
-    if not insertOk then
-        Cast.send(req.gate, "authResult", {
-            fd = req.fd, sessionId = req.sessionId,
-            code = 3, uid = nil, msgId = MsgId.S2C_RegisterResult,
-        })
-        return
-    end
-
-    -- 4. 初始化空玩家文档(upsert)
-    safeMongo("register.player", function()
-        db.players:update({ _id = uid }, { _id = uid, data = {} }, true)
-    end)
-
-    Cast.send(req.gate, "authResult", {
-        fd        = req.fd,
-        sessionId = req.sessionId,
-        code      = 0,
-        uid       = uid,
-        msgId     = MsgId.S2C_RegisterResult,
-    })
-    skynet.error(string.format("[DB] register ok: %s -> uid=%d (server=%d player=%d)",
         req.account, uid, uid >> 13, uid & 0x1FFF))
 end
 

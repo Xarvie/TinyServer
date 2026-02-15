@@ -75,8 +75,7 @@ except ImportError:
 class MsgId:
     C2S_Login          = 1001
     S2C_LoginResult    = 1002
-    C2S_Register       = 1003
-    S2C_RegisterResult = 1004
+    # C2S_Register/S2C_RegisterResult 已删除(authkey模式自动注册)
     C2S_Logout         = 1101
     S2C_Kick           = 1102
     C2S_JoinRoom       = 2001
@@ -90,7 +89,7 @@ class MsgId:
 # ── msgId -> protobuf 消息类 映射 ────────────────────────────
 ENCODE_MAP = {
     MsgId.C2S_Login:      pb.C2S_Login,
-    MsgId.C2S_Register:   pb.C2S_Register,
+    # C2S_Register 已删除(authkey模式自动注册)
     MsgId.C2S_Logout:     pb.C2S_Logout,
     MsgId.C2S_JoinRoom:   pb.C2S_JoinRoom,
     MsgId.C2S_RoomAction: pb.C2S_RoomAction,
@@ -99,7 +98,7 @@ ENCODE_MAP = {
 
 DECODE_MAP = {
     MsgId.S2C_LoginResult:    pb.S2C_LoginResult,
-    MsgId.S2C_RegisterResult: pb.S2C_RegisterResult,
+    # S2C_RegisterResult 已删除
     MsgId.S2C_Kick:           pb.S2C_Kick,
     MsgId.S2C_JoinResult:     pb.S2C_JoinResult,
     MsgId.S2C_RoomSync:       pb.S2C_RoomSync,
@@ -186,14 +185,8 @@ class GameClient:
         except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
             return None, None
 
-    async def register(self, account: str, password: str):
-        await self.send(MsgId.C2S_Register, account=account, password=password)
-        msg_id, msg = await self.recv()
-        assert msg_id == MsgId.S2C_RegisterResult, f"Expected RegisterResult, got {msg_id}"
-        return msg
-
-    async def login(self, account: str, password: str, server_id: int = 1):
-        """登录 (使用authkey认证)"""
+    async def login(self, account: str, server_id: int = 1):
+        """登录 (使用authkey认证，首次登录自动注册)"""
         timestamp = int(time.time())
         authkey = generate_authkey(timestamp, account, server_id)
         await self.send(MsgId.C2S_Login, account=account, authkey=authkey)
@@ -242,7 +235,7 @@ async def test_register(uri: str):
 
         # 首次登录自动注册
         account = f"testuser_{int(time.time())}"
-        result = await c.login(account, "")
+        result = await c.login(account)
         assert result.code == 0, f"Auto register failed with code {result.code}"
         assert result.uid > 0, f"Invalid uid: {result.uid}"
         ok(f"首次登录自动注册成功: account={account}, uid={result.uid}")
@@ -262,7 +255,7 @@ async def test_register_duplicate(uri: str):
     c1 = GameClient(uri, "First")
     try:
         await c1.connect()
-        result = await c1.login(account, "")
+        result = await c1.login(account)
         assert result.code == 0
         uid1 = result.uid
         ok(f"首次登录: uid={uid1}")
@@ -274,7 +267,7 @@ async def test_register_duplicate(uri: str):
     c2 = GameClient(uri, "Second")
     try:
         await c2.connect()
-        result = await c2.login(account, "")
+        result = await c2.login(account)
         assert result.code == 0
         assert result.uid == uid1, f"UID不一致: {result.uid} vs {uid1}"
         ok(f"再次登录成功: uid={result.uid} (UID一致)")
@@ -294,7 +287,7 @@ async def test_login(uri: str):
     c1 = GameClient(uri, "Login1")
     try:
         await c1.connect()
-        result = await c1.login(account, "")
+        result = await c1.login(account)
         assert result.code == 0, f"Login failed: code={result.code}"
         uid = result.uid
         ok(f"首次登录: uid={uid}")
@@ -307,7 +300,7 @@ async def test_login(uri: str):
     c2 = GameClient(uri, "Login2")
     try:
         await c2.connect()
-        result = await c2.login(account, "")
+        result = await c2.login(account)
         assert result.code == 0, f"Login failed: code={result.code}"
         assert result.uid == uid, f"UID mismatch: expected {uid}, got {result.uid}"
         ok(f"再次登录成功: uid={result.uid}")
@@ -318,7 +311,7 @@ async def test_login(uri: str):
         await c2.close()
 
 
-async def test_login_wrong_password(uri: str):
+async def test_login_wrong_authkey(uri: str):
     """测试错误authkey (使用错误的account生成)"""
     section("TEST: Login Wrong AuthKey")
     account = f"authkey_test_{int(time.time())}"
@@ -327,7 +320,7 @@ async def test_login_wrong_password(uri: str):
     c1 = GameClient(uri, "CorrectAK")
     try:
         await c1.connect()
-        result = await c1.login(account, "")
+        result = await c1.login(account)
         assert result.code == 0
         ok(f"正确authkey登录成功: uid={result.uid}")
     finally:
@@ -365,7 +358,7 @@ async def test_login_nonexistent(uri: str):
     try:
         await c.connect()
         account = f"no_such_account_{int(time.time())}"
-        result = await c.login(account, "")
+        result = await c.login(account)
         assert result.code == 0, f"Expected code=0 (auto register), got {result.code}"
         ok(f"不存在账号自动注册成功: uid={result.uid}")
     except Exception as e:
@@ -384,7 +377,7 @@ async def test_heartbeat(uri: str):
     c = GameClient(uri, "HB")
     try:
         await c.connect()
-        result = await c.login(account, "")
+        result = await c.login(account)
         assert result.code == 0
 
         # 发送3次心跳
@@ -435,7 +428,7 @@ async def test_reconnect(uri: str):
     c1 = GameClient(uri, "Old")
     try:
         await c1.connect()
-        r1 = await c1.login(account, "")
+        r1 = await c1.login(account)
         assert r1.code == 0
         ok(f"第一次登录成功: uid={r1.uid}")
 
@@ -443,7 +436,7 @@ async def test_reconnect(uri: str):
         c2 = GameClient(uri, "New")
         try:
             await c2.connect()
-            r2 = await c2.login(account, "")
+            r2 = await c2.login(account)
             assert r2.code == 0
             ok(f"第二次登录成功: uid={r2.uid}")
 
@@ -487,7 +480,7 @@ async def test_stress(uri: str, count: int = 20):
         c = GameClient(uri, f"S{index:03d}")
         try:
             await c.connect()
-            login = await c.login(account, "")
+            login = await c.login(account)
             if login.code != 0:
                 results["fail"] += 1
                 return
@@ -525,7 +518,7 @@ async def test_join_room(uri: str):
     c = GameClient(uri, "Room")
     try:
         await c.connect()
-        result = await c.login(account, "")
+        result = await c.login(account)
         assert result.code == 0
         ok(f"登录成功: uid={result.uid}")
 
@@ -576,7 +569,7 @@ async def test_authkey_demo(uri: str):
 TEST_REGISTRY = {
     "authkey":      [test_authkey_demo],
     "register":     [test_register, test_register_duplicate],
-    "login":        [test_login, test_login_wrong_password, test_login_nonexistent],
+    "login":        [test_login, test_login_wrong_authkey, test_login_nonexistent],
     "heartbeat":    [test_heartbeat, test_heartbeat_before_login],
     "reconnect":    [test_reconnect],
     "room":         [test_join_room],

@@ -14,18 +14,6 @@ message S2C_LoginResult {
     int32 uid  = 2;
 }
 
-// MsgId 1003
-message C2S_Register {
-    string account = 1;
-    string authkey = 2;  // 加密签名: base64(account:serverId:timestamp:signature)
-}
-
-// MsgId 1004
-message S2C_RegisterResult {
-    int32 code = 1;  // 0=成功 1=账号已存在 2=签名验证失败 3=时间戳过期 4=数据库错误
-    int32 uid  = 2;
-}
-
 // ====== 玩家 ======
 
 // MsgId 1101
