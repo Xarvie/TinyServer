@@ -279,7 +279,7 @@ function handler.loadResult(source, result)
 
     entry.data    = result.data or {}
     entry.loading = false
-    entry.dirty   = true  -- Fix #13: 新加载数据标记dirty
+    entry.dirty   = false  -- Fix #10: 刚从DB加载的数据与DB一致，不标记dirty
 
     -- 创建业务根对象 + 挂载模块
     local player = Player.new(entry)
@@ -392,12 +392,14 @@ end
 
 --- 优雅关闭: 触发所有在线玩家的关闭钩子 + 存盘
 --- Fix #2: 只存盘非loading的玩家
+--- Fix #3: 根据save数量动态延迟ack，确保DB有时间处理
 ---@param source integer
 function handler.shutdown(source)
     stopping = true  -- Fix #13: 停止定时存盘
     skynet.error(string.format("[Agent%d] shutting down, saving %d players...",
         agentIndex, playerCount))
 
+    local saveCount = 0
     for uid, entry in pairs(entries) do
         -- 触发关闭钩子(逆序)
         if entry.player then
@@ -408,13 +410,23 @@ function handler.shutdown(source)
         end
         if not entry.loading then
             Cast.send(dbAddr, "save", { uid = uid, data = entry.data })
+            saveCount = saveCount + 1
         end
     end
 
     entries = {}
     playerCount = 0
-    skynet.error(string.format("[Agent%d] shutdown complete", agentIndex))
-    Cast.send(coordinator, "shutdownAck")
+    
+    -- Fix #3: 根据save数量动态延迟ack时间
+    -- 每条save预留20ms处理时间 + 基础延迟500ms，上限3秒
+    local delayCentisecond = math.min(50 + saveCount * 2, 300)
+    skynet.error(string.format("[Agent%d] sent %d saves, delaying ack by %dms",
+        agentIndex, saveCount, delayCentisecond * 10))
+    
+    skynet.timeout(delayCentisecond, function()
+        skynet.error(string.format("[Agent%d] shutdown complete", agentIndex))
+        Cast.send(coordinator, "shutdownAck")
+    end)
 end
 
 ----------------------------------------------------------------

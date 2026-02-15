@@ -32,6 +32,19 @@ local client  ---@type table  MongoDB client handle
 local db      ---@type table  MongoDB database handle
 
 ----------------------------------------------------------------
+-- Fix #2: Save失败重试机制
+----------------------------------------------------------------
+local MAX_RETRY_COUNT = 3           -- 最大重试次数
+local RETRY_INTERVAL_SEC = 5        -- 重试间隔(秒)
+
+---@class SaveRetryItem
+---@field uid integer
+---@field data table
+---@field retryCount integer
+
+local saveRetryQueue = {}  ---@type SaveRetryItem[]  重试队列
+
+----------------------------------------------------------------
 -- MongoDB 工具
 ----------------------------------------------------------------
 
@@ -50,12 +63,47 @@ local function safeMongo(tag, fn)
 end
 
 ----------------------------------------------------------------
+-- Fix #2: 重试队列处理函数（必须在handler之前定义）
+----------------------------------------------------------------
+local function processRetryQueue()
+    if #saveRetryQueue == 0 then return end
+    
+    local newQueue = {}
+    for _, item in ipairs(saveRetryQueue) do
+        local ok = safeMongo(string.format("retry_save_uid_%d", item.uid), function()
+            db.players:update(
+                { _id = item.uid },
+                { ["$set"] = { data = item.data } },
+                true
+            )
+        end)
+        
+        if ok then
+            skynet.error(string.format("[DB] retry save success: uid=%d after %d retries",
+                item.uid, item.retryCount + 1))
+        else
+            item.retryCount = item.retryCount + 1
+            if item.retryCount < MAX_RETRY_COUNT then
+                table.insert(newQueue, item)
+                skynet.error(string.format("[DB] retry save failed: uid=%d, retry=%d/%d",
+                    item.uid, item.retryCount, MAX_RETRY_COUNT))
+            else
+                skynet.error(string.format("[DB] CRITICAL: retry save abandoned after %d attempts: uid=%d",
+                    MAX_RETRY_COUNT, item.uid))
+            end
+        end
+    end
+    saveRetryQueue = newQueue
+end
+
+----------------------------------------------------------------
 -- 命令处理
 ----------------------------------------------------------------
 local handler = {}
 
 --- 初始化: 设置服务地址(MongoDB已在skynet.start中连接完毕)
 --- BugFix BUG-38: 不再在此处连接MongoDB，避免yield导致后续消息竞态
+--- Fix #2: 启动重试队列定时任务
 ---@param source integer
 ---@param cfg table
 function handler.init(source, cfg)
@@ -64,7 +112,16 @@ function handler.init(source, cfg)
     coordinator = cfg.coordinator or source
     idAddr      = cfg.idAddr
 
-    skynet.error("[DB] init complete (service addresses set)")
+    -- Fix #2: 启动定时重试任务
+    local function retryTask()
+        skynet.timeout(RETRY_INTERVAL_SEC * 100, function()
+            retryTask()  -- 先注册下一轮
+            processRetryQueue()
+        end)
+    end
+    retryTask()
+
+    skynet.error("[DB] init complete (service addresses set, retry task started)")
 end
 
 ----------------------------------------------------------------
@@ -278,22 +335,56 @@ function handler.load(source, req)
 end
 
 --- 存盘(agent cast 过来, fire-and-forget)
+--- Fix #2: 失败时加入重试队列
 ---@param source integer
 ---@param req table  { uid, data }
 function handler.save(source, req)
-    safeMongo("save", function()
+    local ok = safeMongo("save", function()
         db.players:update(
             { _id = req.uid },
             { ["$set"] = { data = req.data } },
             true
         )
     end)
+    
+    -- Fix #2: save失败时加入重试队列
+    if not ok then
+        table.insert(saveRetryQueue, {
+            uid = req.uid,
+            data = req.data,
+            retryCount = 0,
+        })
+        skynet.error(string.format("[DB] save failed for uid=%d, added to retry queue (queue size=%d)",
+            req.uid, #saveRetryQueue))
+    end
 end
 
 --- 优雅关闭
+--- Fix #2: shutdown时flush重试队列
 ---@param source integer
 function handler.shutdown(source)
     skynet.error("[DB] shutting down...")
+    
+    -- Fix #2: flush重试队列
+    if #saveRetryQueue > 0 then
+        skynet.error(string.format("[DB] flushing retry queue (%d items)...", #saveRetryQueue))
+        for _, item in ipairs(saveRetryQueue) do
+            local ok = safeMongo(string.format("shutdown_flush_uid_%d", item.uid), function()
+                db.players:update(
+                    { _id = item.uid },
+                    { ["$set"] = { data = item.data } },
+                    true
+                )
+            end)
+            if ok then
+                skynet.error(string.format("[DB] shutdown flush success: uid=%d", item.uid))
+            else
+                skynet.error(string.format("[DB] CRITICAL: shutdown flush failed: uid=%d", item.uid))
+            end
+        end
+        saveRetryQueue = {}
+    end
+    
     if client then
         pcall(client.disconnect, client)
         client = nil

@@ -18,6 +18,7 @@ local Cast   = require "Cast"
 local Shutdown = {}
 
 local PHASE_TIMEOUT_SEC    = 5
+local PHASE2_TIMEOUT_SEC   = 10  -- Fix #3: phase2需要更长超时(agent要存盘)
 local ABSOLUTE_TIMEOUT_SEC = 30
 
 local phase       = 0
@@ -84,7 +85,7 @@ local function nextPhase()
         if idAddr then
             Cast.send(idAddr, "shutdown")
         end
-        skynet.timeout(PHASE_TIMEOUT_SEC * 100, function()
+        skynet.timeout(PHASE2_TIMEOUT_SEC * 100, function()  -- Fix #3: 使用更长超时
             if phase == 2 then
                 skynet.error("[Shutdown] phase2 timeout, forcing next phase")
                 nextPhase()

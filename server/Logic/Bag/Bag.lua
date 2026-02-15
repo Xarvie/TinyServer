@@ -67,25 +67,16 @@ local MAX_STACK   = 9999  -- 单格最大堆叠
 
 --- 构造函数(必须)
 --- ModuleManager.mount(player) 时按拓扑序调用
+--- Fix #8: 只保存player引用，不访问数据，避免loadResult前的悬挂引用
 ---@param player Player  业务根对象
 ---@return Bag
 function Bag.new(player)
     local self = setmetatable({
         player = player,
+        -- Fix #8: 所有数据字段初始化移至onDbInit，此处不访问entry.data
+        data = nil,
+        items = nil,
     }, Bag)
-    -- 获取该模块专属的持久化数据引用
-    -- BugFix BUG-34: 使用 modName 作为 data key，与约定一致
-    self.data = player:getModData(Bag.modName)
-    -- 如果数据段是空的，初始化默认值
-    if not self.data.items then
-        self.data.items = {} 
-    end
-    -- BugFix BUG-4: 初始化cap默认值，防止onDbInit前访问cap为nil
-    if not self.data.cap then
-        self.data.cap = DEFAULT_CAP
-    end
-    -- BugFix BUG-3: 初始化self.items别名，防止onDbInit前访问为nil
-    self.items = self.data.items
     return self
 end
 
