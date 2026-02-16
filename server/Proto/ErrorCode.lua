@@ -1,35 +1,25 @@
 -- Proto/ErrorCode.lua
--- 统一错误码定义，消除散落各处的 magic number
--- 所有服务共用，客户端/服务端对齐
---
--- 命名规范:
---   AUTH_xxx     认证相关
---   KICK_xxx     踢线原因码
---   ROOM_xxx     跨服房间相关
---   INTERNAL_xxx 内部错误
+-- 统一错误码定义，客户端/服务端对齐
 
 ---@class ErrorCode
 local ErrorCode = {
-    ----------------------------------------------------------------
-    -- 认证结果码 (authResult.code)
-    ----------------------------------------------------------------
-    AUTH_OK              = 0,    -- 认证成功
-    AUTH_DB_ERROR        = 4,    -- 数据库错误
-    AUTH_NO_AGENT        = 99,   -- 无可用 agent
+    -- 认证
+    AUTH_OK              = 0,
+    AUTH_DB_ERROR        = 4,
+    AUTH_NO_AGENT        = 99,
 
-    ----------------------------------------------------------------
-    -- 踢线原因码 (S2C_Kick.reason)
-    ----------------------------------------------------------------
-    KICK_NORMAL_LOGOUT   = 0,    -- 正常登出
-    KICK_REPLACED        = 1,    -- 被顶号
-    KICK_HEARTBEAT       = -2,   -- 心跳超时
-    KICK_SERVER_SHUTDOWN = -1,   -- 服务器关闭
+    -- 踢线原因码
+    KICK_NORMAL_LOGOUT   = 0,
+    KICK_REPLACED        = 1,
+    KICK_HEARTBEAT       = -2,
+    KICK_SERVER_SHUTDOWN = -1,
 
-    ----------------------------------------------------------------
-    -- 跨服房间结果码 (S2C_JoinResult.code)
-    ----------------------------------------------------------------
-    ROOM_JOIN_OK         = 0,    -- 加入成功
-    ROOM_FULL            = 1,    -- 房间已满
+    -- 跨服房间
+    ROOM_JOIN_OK         = 0,
+    ROOM_FULL            = 1,
+
+    -- 认证失败上限(gate authkey校验 + db authResult 共用同一阈值)
+    AUTH_FAIL_LIMIT      = 5,
 }
 
 return ErrorCode

@@ -1,4 +1,4 @@
--- proto/MsgId.lua
+-- Proto/MsgId.lua
 -- 协议号定义，客户端服务端共用
 
 ---@class MsgId
@@ -17,10 +17,10 @@ local MsgId = {
     C2S_RoomAction  = 2003,
     S2C_RoomSync    = 2004,
 
-    -- 背包业务 (3xxx)
-    C2S_UseItem    = 3001,
-    S2C_BagUpdate  = 3002,
-    
+    -- 背包 (3xxx)
+    C2S_UseItem     = 3001,
+    S2C_BagUpdate   = 3002,
+
     -- 心跳
     C2S_Ping        = 9001,
     S2C_Pong        = 9002,

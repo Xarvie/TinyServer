@@ -1,12 +1,9 @@
 -- Cross/CrossService.lua
 -- 跨服多人玩法进程: 房间管理
--- 模式: 1~4个gate + 此进程
 -- 全cast，零call
--- BugFix #B20: joinRoom先检查新房间容量，再移除旧房间，防止满房时丢失原房间
 --
--- Phase1-Note: 房间数据全内存，进程重启后丢失。
---   当前设计依赖客户端断线重连后重新 joinRoom。
---   若需服务端持久化房间状态，应将 rooms/uidToRoomId 序列化到 DbService。
+-- 房间数据全内存，进程重启后丢失。
+-- 客户端断线重连后需重新 joinRoom。
 
 local skynet   = require "skynet"
 local Cast     = require "Cast"
@@ -18,28 +15,28 @@ local ErrCode  = require "Proto.ErrorCode"
 -- 房间数据
 ----------------------------------------------------------------
 ---@class RoomMember
----@field uid integer
----@field fd integer
----@field gate integer
+---@field uid   integer
+---@field fd    integer
+---@field gate  integer
 ---@field agent integer
 
 ---@class Room
----@field roomId string
----@field members table<integer, RoomMember>
----@field memberCount integer  Fix #8: O(1)计数
----@field state table
+---@field roomId      string
+---@field members     table<integer, RoomMember>
+---@field memberCount integer
+---@field state       table
 
 ---@type table<string, Room>
 local rooms = {}
 
----@type table<integer, string>  uid -> roomId (反向索引)
+---@type table<integer, string>  uid -> roomId
 local uidToRoomId = {}
 
 local MAX_ROOM_SIZE = 8
 local coordinator   = 0  ---@type integer
 
 ----------------------------------------------------------------
--- 向房间成员广播(经agent)
+-- 向房间成员广播(直接 cast gate，跳过 agent 中转)
 ----------------------------------------------------------------
 ---@param room Room
 ---@param msgId integer
@@ -48,12 +45,47 @@ local coordinator   = 0  ---@type integer
 local function broadcastRoom(room, msgId, body, excludeUid)
     for uid, member in pairs(room.members) do
         if uid ~= excludeUid then
-            Cast.send(member.agent, "crossResult", {
-                uid   = uid,
+            Cast.send(member.gate, "push", {
+                fd    = member.fd,
                 msgId = msgId,
                 body  = body,
             })
         end
+    end
+end
+
+--- 通知单个成员(经 agent，用于需要 agent 处理的场景如 joinResult)
+---@param member RoomMember
+---@param msgId integer
+---@param body table
+local function notifyViaAgent(member, msgId, body)
+    Cast.send(member.agent, "crossResult", {
+        uid   = member.uid,
+        msgId = msgId,
+        body  = body,
+    })
+end
+
+----------------------------------------------------------------
+-- 从旧房间移除玩家(内部工具函数)
+----------------------------------------------------------------
+---@param uid integer
+local function removeFromOldRoom(uid)
+    local roomId = uidToRoomId[uid]
+    if not roomId then return end
+
+    uidToRoomId[uid] = nil
+
+    local room = rooms[roomId]
+    if not room then return end
+
+    if room.members[uid] then
+        room.members[uid] = nil
+        room.memberCount = room.memberCount - 1
+    end
+    if room.memberCount <= 0 then
+        rooms[roomId] = nil
+        skynet.error(string.format("[Cross] room %s destroyed (empty)", roomId))
     end
 end
 
@@ -70,13 +102,13 @@ function handler.init(source, cfg)
 end
 
 --- 加入房间(agent cast过来)
---- BugFix #B20: 先检查新房间容量，再移除旧房间，防止满房时丢失原房间
+--- 先检查新房间容量，再移除旧房间，防止满房时丢失原房间
 ---@param source integer
 ---@param req table  { uid, roomId, fd, gate, agent }
 function handler.joinRoom(source, req)
     local oldRoomId = uidToRoomId[req.uid]
 
-    -- BugFix #B20: 先检查新房间容量(在移除旧房间之前)
+    -- 获取或创建目标房间
     local room = rooms[req.roomId]
     if not room then
         room = {
@@ -88,65 +120,42 @@ function handler.joinRoom(source, req)
         rooms[req.roomId] = room
     end
 
-    -- 如果玩家已在目标房间，更新成员信息即可
-    if oldRoomId == req.roomId and room.members[req.uid] then
-        room.members[req.uid] = {
-            uid   = req.uid,
-            fd    = req.fd,
-            gate  = req.gate,
-            agent = req.agent,
-        }
-        Cast.send(req.agent, "crossResult", {
-            uid   = req.uid,
-            msgId = MsgId.S2C_JoinResult,
-            body  = { code = ErrCode.ROOM_JOIN_OK, roomId = req.roomId },
-        })
-        return
-    end
-
-    -- 人数上限检查(不计算玩家自身，因为还没加入)
-    if room.memberCount >= MAX_ROOM_SIZE then
-        Cast.send(req.agent, "crossResult", {
-            uid   = req.uid,
-            msgId = MsgId.S2C_JoinResult,
-            body  = { code = ErrCode.ROOM_FULL, roomId = req.roomId },
-        })
-        return  -- BugFix #B20: 拒绝时不动旧房间，玩家保留原房间
-    end
-
-    -- 容量检查通过，现在安全移除旧房间
-    if oldRoomId then
-        local oldRoom = rooms[oldRoomId]
-        if oldRoom and oldRoom.members[req.uid] then
-            oldRoom.members[req.uid] = nil
-            oldRoom.memberCount = oldRoom.memberCount - 1
-            if oldRoom.memberCount <= 0 then
-                rooms[oldRoomId] = nil
-                skynet.error(string.format("[Cross] room %s destroyed (empty)", oldRoomId))
-            end
-        end
-        uidToRoomId[req.uid] = nil
-    end
-
-    room.members[req.uid] = {
+    local member = {
         uid   = req.uid,
         fd    = req.fd,
         gate  = req.gate,
         agent = req.agent,
     }
-    room.memberCount = room.memberCount + 1
-    uidToRoomId[req.uid] = req.roomId  -- 反向索引
 
-    Cast.send(req.agent, "crossResult", {
-        uid   = req.uid,
-        msgId = MsgId.S2C_JoinResult,
-        body  = { code = ErrCode.ROOM_JOIN_OK, roomId = req.roomId },
-    })
+    -- 已在目标房间，更新成员信息即可
+    if oldRoomId == req.roomId and room.members[req.uid] then
+        room.members[req.uid] = member
+        notifyViaAgent(member, MsgId.S2C_JoinResult,
+            { code = ErrCode.ROOM_JOIN_OK, roomId = req.roomId })
+        return
+    end
+
+    -- 人数上限检查
+    if room.memberCount >= MAX_ROOM_SIZE then
+        notifyViaAgent(member, MsgId.S2C_JoinResult,
+            { code = ErrCode.ROOM_FULL, roomId = req.roomId })
+        return  -- 拒绝时不动旧房间
+    end
+
+    -- 容量检查通过，安全移除旧房间
+    removeFromOldRoom(req.uid)
+
+    room.members[req.uid] = member
+    room.memberCount = room.memberCount + 1
+    uidToRoomId[req.uid] = req.roomId
+
+    notifyViaAgent(member, MsgId.S2C_JoinResult,
+        { code = ErrCode.ROOM_JOIN_OK, roomId = req.roomId })
 
     skynet.error(string.format("[Cross] %s joined room %s", req.uid, req.roomId))
 end
 
---- 房间操作 -- O(1) 定位房间
+--- 房间操作
 ---@param source integer
 ---@param req table  { uid, actionType, payload }
 function handler.roomAction(source, req)
@@ -155,32 +164,16 @@ function handler.roomAction(source, req)
     local room = rooms[roomId]
     if not room then return end
 
-    -- 处理逻辑(此处简化为广播同步)
     broadcastRoom(room, MsgId.S2C_RoomSync, {
         snapshot = req.payload or "",
     })
 end
 
---- 玩家离开房间 -- O(1) 定位房间
+--- 玩家离开房间
 ---@param source integer
 ---@param req table  { uid }
 function handler.leaveRoom(source, req)
-    local roomId = uidToRoomId[req.uid]
-    if not roomId then return end
-
-    uidToRoomId[req.uid] = nil
-
-    local room = rooms[roomId]
-    if not room then return end
-
-    if room.members[req.uid] then
-        room.members[req.uid] = nil
-        room.memberCount = room.memberCount - 1
-    end
-    if room.memberCount <= 0 then
-        rooms[roomId] = nil
-        skynet.error(string.format("[Cross] room %s destroyed", roomId))
-    end
+    removeFromOldRoom(req.uid)
 end
 
 --- 优雅关闭

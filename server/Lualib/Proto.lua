@@ -2,6 +2,11 @@
 -- protobuf编解码封装（适配 lua-protobuf / pb.dll）
 -- 客户端协议: [2B msgId][protobuf payload]
 -- 服务端内部: 纯lua table cast
+--
+-- msgId 有两层映射:
+--   nameById:      msgId -> MsgId key name (调试/display用, 如 "C2S_Login")
+--   protoNameById: msgId -> .proto message type name (pb编解码用, 如 "LoginReq")
+-- decode/encode 优先查 protoNameById，fallback 到 nameById
 
 local skynet = require "skynet"
 local pb     = require "pb"
@@ -9,21 +14,9 @@ local pb     = require "pb"
 ---@class Proto
 local Proto = {}
 
-local nameById = {}  ---@type table<integer, string>  msgId -> MsgId key name (display/debug)
-local idByName = {}  ---@type table<string, integer>  MsgId key name -> msgId
-
--- BugFix BUG-14: 独立的 msgId -> protobuf message type name 映射
--- 解耦 MsgId 的 key(如 "C2S_Login") 与 .proto 中的 message 名(如 "LoginReq")
--- 未注册 proto mapping 时，fallback 到 nameById(即假设 proto name == MsgId key)
-local protoNameById = {}  ---@type table<integer, string>  msgId -> proto type name
-
---- 注册单个协议映射
----@param id integer
----@param name string
-function Proto.register(id, name)
-    nameById[id] = name
-    idByName[name] = id
-end
+local nameById      = {}  ---@type table<integer, string>
+local idByName      = {}  ---@type table<string, integer>
+local protoNameById = {}  ---@type table<integer, string>
 
 --- 根据MsgId表自动注册所有协议映射
 ---@param msgIdTable table
@@ -34,23 +27,24 @@ function Proto.registerAll(msgIdTable)
     end
 end
 
---- BugFix BUG-14: 注册 msgId -> protobuf message type name 的独立映射
---- 若 .proto 中 message 名与 MsgId key 不同(如 "LoginReq" vs "C2S_Login")，
---- 必须通过此函数注册，否则 pb.decode/encode 找不到类型
---- 示例:
----   Proto.registerProtoMapping({
----       [1001] = "LoginReq",
----       [1002] = "LoginResp",
----   })
----@param mapping table<integer, string>  msgId -> proto message type name
+--- 注册 msgId -> protobuf message type name 的独立映射
+--- 当 .proto 中 message 名与 MsgId key 不同时(如 "LoginReq" vs "C2S_Login")必须注册
+---@param mapping table<integer, string>
 function Proto.registerProtoMapping(mapping)
     for id, protoName in pairs(mapping) do
         protoNameById[id] = protoName
     end
 end
 
+--- 获取 msgId 对应的 pb type name
+---@param msgId integer
+---@return string|nil
+local function resolveTypeName(msgId)
+    return protoNameById[msgId] or nameById[msgId]
+end
+
 --- 解码客户端二进制消息 -> msgId, lua table
----@param data string  raw bytes
+---@param data string
 ---@return integer|nil msgId
 ---@return table|nil   body
 function Proto.decode(data)
@@ -60,8 +54,7 @@ function Proto.decode(data)
     end
     local hi, lo = data:byte(1, 2)
     local msgId = hi * 256 + lo
-    -- BugFix BUG-14: 优先使用 proto type name 映射，fallback 到 MsgId key name
-    local name = protoNameById[msgId] or nameById[msgId]
+    local name = resolveTypeName(msgId)
     if not name then return msgId, nil end
     local ok, body = pcall(pb.decode, name, data:sub(3))
     if ok and body then
@@ -77,8 +70,7 @@ end
 ---@param body table
 ---@return string|nil
 function Proto.encode(msgId, body)
-    -- BugFix BUG-14: 优先使用 proto type name 映射，fallback 到 MsgId key name
-    local name = protoNameById[msgId] or nameById[msgId]
+    local name = resolveTypeName(msgId)
     if not name then return nil end
     local ok, payload = pcall(pb.encode, name, body)
     if not ok or not payload then return nil end
@@ -102,27 +94,19 @@ end
 function Proto.load(path)
     local f = io.open(path, "rb")
     if not f then
-        local msg = string.format("[Proto] FATAL: cannot open pb file: %s", path)
-        skynet.error(msg)
-        error(msg)
+        error(string.format("[Proto] FATAL: cannot open pb file: %s", path))
     end
     local content = f:read("*a")
     f:close()
     if not content or #content == 0 then
-        local msg = string.format("[Proto] FATAL: pb file is empty: %s", path)
-        skynet.error(msg)
-        error(msg)
+        error(string.format("[Proto] FATAL: pb file is empty: %s", path))
     end
 
-    -- lua-protobuf 使用 pb.load() 而非 protobuf.register()
     local ok, err = pb.load(content)
     if not ok then
-        local msg = string.format("[Proto] FATAL: pb.load failed: %s", tostring(err))
-        skynet.error(msg)
-        error(msg)
+        error(string.format("[Proto] FATAL: pb.load failed: %s", tostring(err)))
     end
 
-    -- 自动注册MsgId <-> proto name映射
     local MsgId = require "Proto.MsgId"
     Proto.registerAll(MsgId)
 

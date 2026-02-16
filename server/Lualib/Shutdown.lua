@@ -3,13 +3,10 @@
 -- 全cast，各服务完成后cast回 shutdownAck 驱动下一阶段
 -- 兜底: 每阶段最长等待 PHASE_TIMEOUT_SEC 秒
 --
--- 关闭顺序设计:
---   phase1: gate       (停止接入新连接)
---   phase2: agent+cross+id  (id 在 db 之前关闭，确保最终 saveIdCounter 被 db 处理)
---   phase3: db         (最后关闭，flush 所有写入)
---
--- Fix #3: 用地址集合(pendingAcks)精确跟踪每阶段的ack来源
--- BugFix #B9: 用 pendingCount 计数器替代遍历 pendingAcks，O(1)
+-- 关闭顺序:
+--   phase1: gate          停止接入新连接
+--   phase2: agent+cross+id  id 在 db 之前关闭，确保 saveIdCounter 被 db 处理
+--   phase3: db            最后关闭，flush 所有写入
 
 local skynet = require "skynet"
 local Cast   = require "Cast"
@@ -17,93 +14,86 @@ local Cast   = require "Cast"
 ---@class Shutdown
 local Shutdown = {}
 
-local PHASE_TIMEOUT_SEC    = 5
-local PHASE2_TIMEOUT_SEC   = 10  -- Fix #3: phase2需要更长超时(agent要存盘)
+----------------------------------------------------------------
+-- 常量
+----------------------------------------------------------------
+local PHASE1_TIMEOUT_SEC   = 5
+local PHASE2_TIMEOUT_SEC   = 10   -- agent 需要更长超时(存盘)
+local PHASE3_TIMEOUT_SEC   = 5
 local ABSOLUTE_TIMEOUT_SEC = 30
 
-local phase       = 0
-local started     = false
-local gates       = {}    ---@type integer[]
-local agents      = {}    ---@type integer[]
-local dbAddr      = 0     ---@type integer
-local crossAddr   = nil   ---@type integer|nil
-local idAddr      = nil   ---@type integer|nil
+----------------------------------------------------------------
+-- 状态(收敛到单表，避免散落的 upvalue)
+----------------------------------------------------------------
+local S = {
+    phase        = 0,
+    started      = false,
+    gates        = {},    ---@type integer[]
+    agents       = {},    ---@type integer[]
+    dbAddr       = 0,     ---@type integer
+    crossAddr    = nil,   ---@type integer|nil
+    idAddr       = nil,   ---@type integer|nil
+    pendingAcks  = {},    ---@type table<integer, boolean>
+    pendingCount = 0,
+}
 
-local pendingAcks  = {}   ---@type table<integer, boolean>
-local pendingCount = 0
+----------------------------------------------------------------
+-- 阶段推进
+----------------------------------------------------------------
 
---- 进入下一阶段
-local function nextPhase()
-    phase = phase + 1
-    pendingAcks  = {}
-    pendingCount = 0
+local function nextPhase()  -- forward declaration
+end
 
-    if phase == 1 then
-        -- Phase 1: 关闭gate(停止接入)
-        skynet.error(string.format("[Shutdown] phase1: closing %d gates", #gates))
-        if #gates == 0 then
+--- 发起一个阶段: 设置 pending 集合 + 发送 shutdown + 注册超时
+---@param targets table[]  { addr1, addr2, ... } 或混合数组
+---@param timeoutSec number
+local function startPhase(targets, timeoutSec)
+    S.pendingAcks  = {}
+    S.pendingCount = 0
+    for _, addr in ipairs(targets) do
+        S.pendingAcks[addr] = true
+        S.pendingCount = S.pendingCount + 1
+    end
+
+    if S.pendingCount == 0 then
+        nextPhase()
+        return
+    end
+
+    for _, addr in ipairs(targets) do
+        Cast.send(addr, "shutdown")
+    end
+
+    local phaseSnapshot = S.phase
+    skynet.timeout(timeoutSec * 100, function()
+        if S.phase == phaseSnapshot then
+            skynet.error(string.format("[Shutdown] phase%d timeout, forcing next phase", S.phase))
             nextPhase()
-            return
         end
-        for _, addr in ipairs(gates) do
-            pendingAcks[addr] = true
-            pendingCount = pendingCount + 1
-        end
-        Cast.broadcast(gates, "shutdown")
-        skynet.timeout(PHASE_TIMEOUT_SEC * 100, function()
-            if phase == 1 then
-                skynet.error("[Shutdown] phase1 timeout, forcing next phase")
-                nextPhase()
-            end
-        end)
+    end)
+end
 
-    elseif phase == 2 then
-        -- Phase 2: 关闭 agent + cross + id
-        -- id 必须在 db 之前关闭: shutdown 时 id cast saveIdCounter 到 db,
-        -- db 在 phase3 才关闭, 保证这条 cast 被处理
-        skynet.error(string.format("[Shutdown] phase2: closing %d agents + cross + id", #agents))
-        for _, addr in ipairs(agents) do
-            pendingAcks[addr] = true
-            pendingCount = pendingCount + 1
-        end
-        if crossAddr then
-            pendingAcks[crossAddr] = true
-            pendingCount = pendingCount + 1
-        end
-        if idAddr then
-            pendingAcks[idAddr] = true
-            pendingCount = pendingCount + 1
-        end
-        if pendingCount == 0 then
-            nextPhase()
-            return
-        end
-        Cast.broadcast(agents, "shutdown")
-        if crossAddr then
-            Cast.send(crossAddr, "shutdown")
-        end
-        if idAddr then
-            Cast.send(idAddr, "shutdown")
-        end
-        skynet.timeout(PHASE2_TIMEOUT_SEC * 100, function()  -- Fix #3: 使用更长超时
-            if phase == 2 then
-                skynet.error("[Shutdown] phase2 timeout, forcing next phase")
-                nextPhase()
-            end
-        end)
+nextPhase = function()
+    S.phase = S.phase + 1
 
-    elseif phase == 3 then
-        -- Phase 3: 关闭db(最后, flush所有pending writes)
+    if S.phase == 1 then
+        skynet.error(string.format("[Shutdown] phase1: closing %d gates", #S.gates))
+        startPhase(S.gates, PHASE1_TIMEOUT_SEC)
+
+    elseif S.phase == 2 then
+        -- agent + cross + id 同时关闭
+        local targets = {}
+        for _, addr in ipairs(S.agents) do
+            targets[#targets + 1] = addr
+        end
+        if S.crossAddr then targets[#targets + 1] = S.crossAddr end
+        if S.idAddr    then targets[#targets + 1] = S.idAddr    end
+        skynet.error(string.format("[Shutdown] phase2: closing %d agents + cross + id", #S.agents))
+        startPhase(targets, PHASE2_TIMEOUT_SEC)
+
+    elseif S.phase == 3 then
         skynet.error("[Shutdown] phase3: closing db")
-        pendingAcks[dbAddr] = true
-        pendingCount = 1
-        Cast.send(dbAddr, "shutdown")
-        skynet.timeout(PHASE_TIMEOUT_SEC * 100, function()
-            if phase == 3 then
-                skynet.error("[Shutdown] phase3 timeout, forcing exit")
-                nextPhase()
-            end
-        end)
+        startPhase({ S.dbAddr }, PHASE3_TIMEOUT_SEC)
 
     else
         skynet.error("[Shutdown] === graceful shutdown complete ===")
@@ -113,43 +103,47 @@ local function nextPhase()
     end
 end
 
+----------------------------------------------------------------
+-- 公共接口
+----------------------------------------------------------------
+
 --- 接收服务的关闭完成确认
 ---@param source integer
 function Shutdown.onAck(source)
-    if not pendingAcks[source] then
-        skynet.error(string.format("[Shutdown] ignoring stale/unexpected ack from %08x (phase%d)",
-            source, phase))
+    if not S.pendingAcks[source] then
+        skynet.error(string.format("[Shutdown] ignoring stale ack from %08x (phase%d)",
+            source, S.phase))
         return
     end
-    pendingAcks[source] = nil
-    pendingCount = pendingCount - 1
+    S.pendingAcks[source] = nil
+    S.pendingCount = S.pendingCount - 1
     skynet.error(string.format("[Shutdown] phase%d ack from %08x, remaining=%d",
-        phase, source, pendingCount))
-    if pendingCount <= 0 then
+        S.phase, source, S.pendingCount))
+    if S.pendingCount <= 0 then
         nextPhase()
     end
 end
 
 --- 执行优雅关闭序列
----@param gateList integer[]
+---@param gateList  integer[]
 ---@param agentList integer[]
----@param db integer
----@param cross integer|nil
----@param id integer|nil
+---@param db        integer
+---@param cross     integer|nil
+---@param id        integer|nil
 function Shutdown.execute(gateList, agentList, db, cross, id)
-    if started then
+    if S.started then
         skynet.error("[Shutdown] already in progress, ignoring duplicate execute")
         return
     end
-    started = true
+    S.started   = true
+    S.gates     = gateList
+    S.agents    = agentList
+    S.dbAddr    = db
+    S.crossAddr = cross
+    S.idAddr    = id
+    S.phase     = 0
 
     skynet.error("[Shutdown] === graceful shutdown begin ===")
-    gates     = gateList
-    agents    = agentList
-    dbAddr    = db
-    crossAddr = cross
-    idAddr    = id
-    phase     = 0
 
     skynet.timeout(ABSOLUTE_TIMEOUT_SEC * 100, function()
         skynet.error("[Shutdown] ABSOLUTE TIMEOUT reached, forcing abort")

@@ -7,26 +7,24 @@
 --   2. 提供通用工具方法(pushClient/kick)
 --   3. 作为模块间相互访问的中介(player.Bag / player.Role)
 --
--- 设计约束:
---   - Player 本身 不 注册为业务模块(scan时跳过 player/ 目录)
---   - Player 不持有业务状态，所有持久化数据存于 entry.data[modName]
---   - 模块间通信: player.Bag:someMethod() (直接方法调用，同进程零开销)
---   - 注意: modName 大小写敏感，以模块声明的 modName 为准
+-- 生命周期契约:
+--   - Player 本身不注册为业务模块(scan时跳过 Player/ 目录)
+--   - destroy() 后 entry=nil, isOnline()=false, getData()/getModData() 返回 nil
+--   - 上层(AgentService)保证 destroy 后不再对 Player 发起业务调用
+--   - 模块内的防御性 nil 检查仅作为安全网，不应被常规流程触发
 
 local Cast  = require "Cast"
 
 ---@class Player
 ---@field entry    PlayerEntry  AgentService持有的原始数据条目(共享引用)
----@field uid      integer      冗余缓存，避免频繁 entry.uid
+---@field uid      integer      冗余缓存
 ---@field fd       integer      当前连接fd
 ---@field gate     integer      当前gate地址
 ---@field [string] table        动态挂载的模块实例(player.Bag, player.Role, ...)
 local Player = {}
 Player.__index = Player
 
---- 构造Player上下文
---- 注意: 构造后需调用 ModuleManager.mount(player) 挂载模块
----@param entry PlayerEntry  AgentService中的玩家条目(共享引用，非拷贝)
+---@param entry PlayerEntry
 ---@return Player
 function Player.new(entry)
     local self = setmetatable({}, Player)
@@ -37,8 +35,7 @@ function Player.new(entry)
     return self
 end
 
---- Fix #11: 显式销毁，断开entry引用，使isOnline()返回false
---- AgentService 在 unmount 后调用
+--- 显式销毁，断开entry引用
 function Player:destroy()
     self.entry = nil
 end
@@ -47,9 +44,8 @@ end
 -- 客户端通信
 ----------------------------------------------------------------
 
---- 向客户端推送消息(经由gate转发)
----@param msgId integer  协议号
----@param body  table    消息体
+---@param msgId integer
+---@param body  table
 function Player:pushClient(msgId, body)
     Cast.send(self.gate, "push", {
         fd    = self.fd,
@@ -58,12 +54,11 @@ function Player:pushClient(msgId, body)
     })
 end
 
---- 踢下线(经由gate)
 ---@param reason integer  踢线原因码
 function Player:kick(reason)
     Cast.send(self.gate, "kick", {
         fd     = self.fd,
-        uid    = self.uid,   -- BugFix #B16: 携带uid供gate校验
+        uid    = self.uid,
         reason = reason or 0,
     })
 end
@@ -73,7 +68,6 @@ end
 ----------------------------------------------------------------
 
 --- 获取玩家持久化数据根表(直接引用)
---- BugFix BUG-30: destroy后调用返回nil而非崩溃
 ---@return table|nil
 function Player:getData()
     if not self.entry then return nil end
@@ -81,11 +75,9 @@ function Player:getData()
 end
 
 --- 获取/初始化指定模块的数据段
---- 约定: entry.data[modName] 为该模块的持久化数据
---- 首次访问时自动创建空表
---- BugFix BUG-30: destroy后调用返回nil而非崩溃
----@param modName string  模块名
----@return table|nil  该模块的数据段(引用)
+--- 约定: entry.data[modName] 为该模块的持久化数据，首次访问时自动创建空表
+---@param modName string
+---@return table|nil
 function Player:getModData(modName)
     if not self.entry then return nil end
     local data = self.entry.data
@@ -95,7 +87,6 @@ function Player:getModData(modName)
     return data[modName]
 end
 
---- 检查玩家是否仍在线(entry未被移除)
 ---@return boolean
 function Player:isOnline()
     return self.entry ~= nil and self.entry.loading == false

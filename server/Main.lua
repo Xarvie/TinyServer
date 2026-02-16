@@ -4,8 +4,6 @@
 --
 -- 启动顺序: db -> id -> agent -> cross -> (sleep) -> gate
 -- 关闭顺序: gate -> agent+cross+id -> db
---
--- BugFix #B14: 调整init顺序，确保agent/db/cross先初始化，再初始化gate(gate init会开始监听)
 
 local skynet   = require "skynet"
 local Cast     = require "Cast"
@@ -19,17 +17,17 @@ skynet.start(function()
     local Cfg = require "Config.Config"
     local self = skynet.self()
 
-    -- 1. 启动db服务(最先: IdService 依赖它)
+    -- 1. db (最先: IdService 依赖它)
     local dbAddr = skynet.newservice("Db/DbService")
     skynet.name(".db", dbAddr)
     skynet.error("[Main] db started")
 
-    -- 2. 启动id服务(全服唯一可被call的服务)
+    -- 2. id (全服唯一可被call的服务)
     local idAddr = skynet.newservice("Login/IdService")
     skynet.name(".id", idAddr)
     skynet.error("[Main] id service started")
 
-    -- 3. 启动agent池
+    -- 3. agent 池
     local agents = {}
     for i = 1, Cfg.agentCount do
         local addr = skynet.newservice("Agent/AgentService", i)
@@ -38,12 +36,12 @@ skynet.start(function()
     end
     skynet.error(string.format("[Main] %d agents started", #agents))
 
-    -- 4. 启动cross(跨服多人)
+    -- 4. cross (跨服多人)
     local crossAddr = skynet.newservice("Cross/CrossService")
     skynet.name(".cross", crossAddr)
     skynet.error("[Main] cross started")
 
-    -- 5. 启动gate
+    -- 5. gate
     local gates = {}
     for i = 1, Cfg.gateCount do
         local addr = skynet.newservice("Gate/GateService", i)
@@ -72,6 +70,7 @@ skynet.start(function()
             agentIndex  = i,
             gates       = gates,
             dbAddr      = dbAddr,
+            crossAddr   = crossAddr,
             coordinator = self,
         })
     end
@@ -80,8 +79,7 @@ skynet.start(function()
         coordinator = self,
     })
 
-    -- gate 最后初始化: 等待其他服务就绪
-    -- BugFix BUG-11: sleep(100)(1秒)等待 agent ModuleManager.scan 等完成
+    -- gate 最后初始化: 等待其他服务就绪(agent scan 等完成)
     skynet.sleep(100)
 
     for i, gateAddr in ipairs(gates) do
@@ -100,7 +98,7 @@ skynet.start(function()
 
     skynet.error("[Main] all services initialized, system ready")
 
-    -- 6. 注册main自身的命令处理(接收shutdownAck)
+    -- 6. main 自身的命令处理
     local handler = {}
 
     function handler.shutdownAck(source)

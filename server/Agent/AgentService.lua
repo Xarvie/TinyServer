@@ -1,27 +1,11 @@
 -- Agent/AgentService.lua
 -- Agent服务(容器层): 纯生命周期管理 + 消息调度
 -- 全cast，零call
--- 所有业务逻辑已剥离至 logic/ 下的模块，由 ModuleManager 自动发现和编排
+-- 所有业务逻辑在 Logic/ 下的模块中，由 ModuleManager 自动发现和编排
 --
 -- 职责边界:
 --   容器层(本文件): online/offline/loadResult/clientMsg/shutdown + pending队列
 --   业务层(模块):   通过 ModuleManager.dispatch/trigger 驱动
---
--- 保留原有Fix/BugFix:
---   Fix #2:  loading期间离线不存盘
---   Fix #4:  离线时通知Cross移除房间成员
---   Fix #7:  agentIndex转为integer
---   Fix #9:  loadSeq防止顶号后双loadResult竞态
---   Fix #10: uid 从 string 改为 int32
---   Fix #11: Player:destroy() 断开entry引用，isOnline()语义正确
---   Fix #12: 顶号时记录loading状态旧entry的pending丢弃日志
---   Fix #13: 周期定时存盘，防止进程崩溃丢失数据
---   BugFix #B16: kick请求携带uid
---   BugFix #B17: pending回放中检测player已被移除则中断
---   BugFix #B21: handler.init中同步agentIndex
---   BugFix BUG-24: containerMsgIds改为查表驱动，消除死代码
---   BugFix BUG-25: 添加C2S_Logout容器级处理，触发正常离线流程
---   BugFix BUG-26: pending队列上限，防止loading期间OOM
 
 local skynet         = require "skynet"
 local Cast           = require "Cast"
@@ -31,13 +15,14 @@ local ErrCode        = require "Proto.ErrorCode"
 local ModuleManager  = require "Agent.ModuleManager"
 local Player         = require "Logic.Player.Player"
 
-local agentIndex  = tonumber((...)) or 0  -- Fix #7
+local agentIndex  = tonumber((...)) or 0
 local gates       = {}   ---@type integer[]
 local dbAddr      = 0    ---@type integer
+local crossAddr   = nil  ---@type integer|nil  init时缓存，不再每次localname查找
 local coordinator = 0    ---@type integer
 
 ----------------------------------------------------------------
--- 全局loadSeq生成器(Fix #9)
+-- 全局loadSeq生成器: 防止顶号后双loadResult竞态
 ----------------------------------------------------------------
 local globalLoadSeq = 0
 
@@ -48,33 +33,58 @@ local globalLoadSeq = 0
 ---@field uid      integer
 ---@field fd       integer
 ---@field gate     integer
----@field data     table        玩家持久化数据快照
----@field loading  boolean      是否正在加载数据
----@field pending  table[]|nil  加载期间暂存的消息队列
----@field loadSeq  integer      当前加载序号(Fix #9)
----@field player   Player|nil   业务根对象(loading完成后挂载)
----@field dirty    boolean      是否有数据变更待存盘(Fix #13)
+---@field data     table
+---@field loading  boolean
+---@field pending  table[]|nil
+---@field loadSeq  integer
+---@field player   Player|nil
+---@field dirty    boolean
 
 local entries     = {}  ---@type table<integer, PlayerEntry>
 local playerCount = 0
-local stopping    = false  -- Fix #13: 定时存盘在shutdown后停止
-local MAX_PENDING = 100   -- BugFix BUG-26: pending队列上限，防OOM
+local stopping    = false
+local MAX_PENDING = 100
 
 ----------------------------------------------------------------
--- 通知Cross清理玩家(Fix #4)
+-- 统一的 entry 清理函数(消除 online/offline/logout/shutdown 中的重复)
+--
+-- 参数:
+--   entry      要清理的 PlayerEntry
+--   hookName   生命周期钩子名("onLogout" / "onShutdown")
+--   opts.save  是否存盘(loading期间不存盘)
+--   opts.removeEntry  是否从 entries 表中删除并减 playerCount
 ----------------------------------------------------------------
----@param uid integer
-local function notifyCrossLeave(uid)
-    local crossAddr = skynet.localname(".cross")
+---@param entry PlayerEntry
+---@param hookName string
+---@param opts { save: boolean, removeEntry: boolean }
+local function cleanupEntry(entry, hookName, opts)
+    -- 1. 触发模块钩子(逆拓扑序) + 卸载 + 销毁Player
+    if entry.player then
+        ModuleManager.triggerReverse(hookName, entry.player)
+        ModuleManager.unmount(entry.player)
+        entry.player:destroy()
+        entry.player = nil
+    end
+
+    -- 2. 通知Cross移除房间成员
     if crossAddr then
-        Cast.send(crossAddr, "leaveRoom", { uid = uid })
+        Cast.send(crossAddr, "leaveRoom", { uid = entry.uid })
+    end
+
+    -- 3. 存盘(loading期间data不完整，跳过)
+    if opts.save and not entry.loading then
+        Cast.send(dbAddr, "save", { uid = entry.uid, data = entry.data })
+    end
+
+    -- 4. 从entries表移除
+    if opts.removeEntry then
+        entries[entry.uid] = nil
+        playerCount = playerCount - 1
     end
 end
 
 ----------------------------------------------------------------
 -- 容器级客户端消息处理(心跳、登出等不走业务模块)
--- BugFix BUG-24: 改为查表驱动，containerMsgIds 表不再是死代码
--- BugFix BUG-25: 添加 C2S_Logout 处理，触发正常离线流程
 ----------------------------------------------------------------
 
 ---@type table<integer, fun(entry: PlayerEntry, body: table): boolean>
@@ -88,28 +98,9 @@ local containerMsgHandlers = {
         return true
     end,
 
-    --- BugFix BUG-25: C2S_Logout 触发正常离线流程
     [MsgId.C2S_Logout] = function(entry, body)
-        -- 触发登出钩子(逆序)
-        if entry.player then
-            ModuleManager.triggerReverse("onLogout", entry.player)
-            ModuleManager.unmount(entry.player)
-            entry.player:destroy()
-            entry.player = nil
-        end
-        notifyCrossLeave(entry.uid)
-
-        -- 存盘
-        if not entry.loading then
-            Cast.send(dbAddr, "save", { uid = entry.uid, data = entry.data })
-        end
-
-        -- 通知gate踢下线
+        cleanupEntry(entry, "onLogout", { save = true, removeEntry = true })
         Cast.send(entry.gate, "kick", { fd = entry.fd, uid = entry.uid, reason = ErrCode.KICK_NORMAL_LOGOUT })
-
-        -- 清理entry
-        entries[entry.uid] = nil
-        playerCount = playerCount - 1
         skynet.error(string.format("[Agent%d] player logout: %d", agentIndex, entry.uid))
         return true
     end,
@@ -120,9 +111,9 @@ local containerMsgHandlers = {
 ---@param body  table
 ---@return boolean handled
 local function handleContainerMsg(entry, msgId, body)
-    local handler_fn = containerMsgHandlers[msgId]
-    if handler_fn then
-        return handler_fn(entry, body)
+    local fn = containerMsgHandlers[msgId]
+    if fn then
+        return fn(entry, body)
     end
     return false
 end
@@ -134,17 +125,13 @@ end
 ---@param msgId integer
 ---@param body  table
 local function dispatchClientMsg(entry, msgId, body)
-    -- 1. 容器级消息(心跳等)
     if handleContainerMsg(entry, msgId, body) then
         return
     end
-    -- 2. 业务模块路由(O(1))
     if entry.player then
-        -- BugFix BUG-21: dispatch 返回 (handled, modified)
-        -- 只读查询的 handler 返回 false 时 modified=false，不标记 dirty
         local handled, modified = ModuleManager.dispatch(entry.player, msgId, body)
         if modified then
-            entry.dirty = true  -- Fix #13: 标记有数据变更
+            entry.dirty = true
         end
         if not handled then
             skynet.error(string.format("[Agent%d] unhandled msgId=%d uid=%d",
@@ -158,29 +145,23 @@ end
 ----------------------------------------------------------------
 local handler = {}
 
---- 初始化
---- BugFix #B21: 同步agentIndex
---- 新增: ModuleManager扫描+初始化(全局一次)
 ---@param source integer
 ---@param cfg table
 function handler.init(source, cfg)
     gates       = cfg.gates
     dbAddr      = cfg.dbAddr
+    crossAddr   = cfg.crossAddr   -- init时缓存，不再每次localname
     coordinator = cfg.coordinator or source
-    agentIndex  = cfg.agentIndex or agentIndex  -- BugFix #B21
+    agentIndex  = cfg.agentIndex or agentIndex
 
-    -- 模块系统初始化(仅首次)
     ModuleManager.scan("Logic")
     ModuleManager.init()
 
-    -- Fix #13: 周期定时存盘(每5分钟)
-    -- BugFix BUG-15: 先注册下次timeout再执行存盘，防止遍历耗时导致间隔拉长
+    -- 周期定时存盘(每5分钟)
     local SAVE_INTERVAL_SEC = 300
-    local function periodicSave()
-        if stopping then return end
-        skynet.timeout(SAVE_INTERVAL_SEC * 100, function()
-            if stopping then return end
-            periodicSave()  -- BugFix BUG-15: 先注册下一轮，再执行存盘
+    Cast.setInterval(SAVE_INTERVAL_SEC,
+        function() return stopping end,
+        function()
             local saved = 0
             for uid, entry in pairs(entries) do
                 if not entry.loading and entry.dirty then
@@ -192,50 +173,34 @@ function handler.init(source, cfg)
             if saved > 0 then
                 skynet.error(string.format("[Agent%d] periodic save: %d players", agentIndex, saved))
             end
-        end)
-    end
-    periodicSave()
+        end
+    )
 
     skynet.error(string.format("[Agent%d] initialized, %d modules loaded",
         agentIndex, ModuleManager.getModuleCount()))
 end
 
 --- 玩家上线(gate cast过来)
---- 容器职责: 创建entry、处理顶号、发起异步加载
 ---@param source integer
 ---@param req table  { uid, fd, gate }
 function handler.online(source, req)
-    -- 顶号检测
     local old = entries[req.uid]
     if old then
-        -- BugFix #B16: kick携带uid
+        -- 顶号: 踢旧连接
         Cast.send(old.gate, "kick", { fd = old.fd, uid = old.uid, reason = ErrCode.KICK_REPLACED })
-        -- 触发旧Player的登出清理(逆序)
-        if old.player then
-            ModuleManager.triggerReverse("onLogout", old.player)
-            ModuleManager.unmount(old.player)
-            old.player:destroy()  -- Fix #11: 断开entry引用
-            old.player = nil
-        end
-        -- Fix #12: loading状态被顶号，记录pending丢弃信息
+
         if old.loading and old.pending and #old.pending > 0 then
             skynet.error(string.format(
                 "[Agent%d] player %d replaced during loading, %d pending msgs discarded",
                 agentIndex, req.uid, #old.pending))
         end
-        notifyCrossLeave(req.uid)  -- Fix #4
 
-        -- BugFix BUG-2: 顶号时对非loading的旧entry执行存盘，防止数据回档
-        if not old.loading then
-            Cast.send(dbAddr, "save", { uid = req.uid, data = old.data })
-        end
-
-        -- 不减playerCount，同uid复用slot
+        -- 清理旧entry(存盘+钩子)但不减playerCount(同uid复用slot)
+        cleanupEntry(old, "onLogout", { save = true, removeEntry = false })
     else
         playerCount = playerCount + 1
     end
 
-    -- Fix #9: 递增loadSeq
     globalLoadSeq = globalLoadSeq + 1
     local seq = globalLoadSeq
 
@@ -247,8 +212,8 @@ function handler.online(source, req)
         loading = true,
         pending = {},
         loadSeq = seq,
-        player  = nil,  -- loading完成后创建
-        dirty   = false,  -- Fix #13: 定时存盘标记
+        player  = nil,
+        dirty   = false,
     }
 
     Cast.send(dbAddr, "load", {
@@ -262,16 +227,13 @@ function handler.online(source, req)
 end
 
 --- db加载完成回调
---- 容器职责: 校验loadSeq、填充data、创建Player并mount模块、触发生命周期、回放pending
---- Fix #9: 忽略过期loadResult
---- BugFix #B17: 回放pending时检测player是否已被移除
 ---@param source integer
 ---@param result table  { uid, data, loadSeq }
 function handler.loadResult(source, result)
     local entry = entries[result.uid]
     if not entry then return end
 
-    -- Fix #9
+    -- 忽略过期loadResult(顶号后旧的加载结果)
     if result.loadSeq and entry.loadSeq ~= result.loadSeq then
         skynet.error(string.format("[Agent%d] stale loadResult uid=%d seq=%d expect=%d, ignored",
             agentIndex, result.uid, result.loadSeq, entry.loadSeq))
@@ -280,19 +242,14 @@ function handler.loadResult(source, result)
 
     entry.data    = result.data or {}
     entry.loading = false
-    entry.dirty   = false  -- Fix #10: 刚从DB加载的数据与DB一致，不标记dirty
+    entry.dirty   = false  -- 刚从DB加载，与DB一致
 
     -- 创建业务根对象 + 挂载模块
     local player = Player.new(entry)
     entry.player = player
 
-    -- 模块实例化(按拓扑序)
     ModuleManager.mount(player)
-
-    -- 触发数据初始化钩子(模块读取/修正持久化数据)
     ModuleManager.trigger("onDbInit", player)
-
-    -- 触发登录钩子(推送初始数据等)
     ModuleManager.trigger("onPlayerLogin", player)
 
     -- 回放加载期间暂存的消息
@@ -300,11 +257,10 @@ function handler.loadResult(source, result)
     entry.pending = nil
     if pending then
         for _, msg in ipairs(pending) do
-            -- BugFix #B17 + Phase1-Fix: 检查entry身份一致性，而非仅存在性
-            -- dispatchClientMsg中若触发顶号(如C2S_Logout), entries[uid]可能指向新entry
+            -- 回放中若触发顶号(如C2S_Logout), entries[uid]可能指向新entry
             if entries[result.uid] ~= entry then
                 skynet.error(string.format(
-                    "[Agent%d] pending replay interrupted: uid=%d entry replaced or removed",
+                    "[Agent%d] pending replay interrupted: uid=%d entry replaced",
                     agentIndex, result.uid))
                 break
             end
@@ -314,8 +270,6 @@ function handler.loadResult(source, result)
 end
 
 --- 玩家离线(gate cast过来)
---- Fix #2: loading期间不存盘
---- Fix #4: 通知Cross
 ---@param source integer
 ---@param req table  { uid, fd, gate }
 function handler.offline(source, req)
@@ -323,31 +277,17 @@ function handler.offline(source, req)
     if not entry then return end
     if entry.fd ~= req.fd then return end  -- 已被顶号，忽略旧fd
 
-    -- 触发登出钩子(逆序，模块可做清理/追加存盘数据)
-    if entry.player then
-        ModuleManager.triggerReverse("onLogout", entry.player)
-        ModuleManager.unmount(entry.player)
-        entry.player:destroy()  -- Fix #11: 断开entry引用
-        entry.player = nil
-    end
+    cleanupEntry(entry, "onLogout", { save = true, removeEntry = true })
 
-    notifyCrossLeave(req.uid)  -- Fix #4
-
-    -- Fix #2: loading期间不存盘
-    if not entry.loading then
-        Cast.send(dbAddr, "save", { uid = req.uid, data = entry.data })
-    else
+    if entry.loading then
         skynet.error(string.format("[Agent%d] player %d offline during loading, skip save",
             agentIndex, req.uid))
     end
 
-    entries[req.uid] = nil
-    playerCount = playerCount - 1
     skynet.error(string.format("[Agent%d] player offline: %d", agentIndex, req.uid))
 end
 
---- 处理客户端消息(gate转发过来)
---- 容器职责: loading期间暂存(心跳除外)，否则分发
+--- 客户端消息(gate转发过来)
 ---@param source integer
 ---@param req table  { uid, msgId, body, fd, gate }
 function handler.clientMsg(source, req)
@@ -365,10 +305,9 @@ function handler.clientMsg(source, req)
             return
         end
         if entry.pending then
-            -- BugFix BUG-26: pending队列上限，防止loading耗时长时OOM
             if #entry.pending >= MAX_PENDING then
                 skynet.error(string.format(
-                    "[Agent%d] pending queue full for uid=%d, dropping msgId=%d",
+                    "[Agent%d] pending queue full uid=%d, dropping msgId=%d",
                     agentIndex, req.uid, req.msgId))
                 return
             end
@@ -392,47 +331,34 @@ function handler.crossResult(source, result)
     entry.player:pushClient(result.msgId, result.body)
 end
 
---- 优雅关闭: 触发所有在线玩家的关闭钩子 + 存盘
---- Fix #2: 只存盘非loading的玩家
---- Fix #3 + Phase1-Fix: 延迟ack为尽力而为的缓冲，真正的保障在 Shutdown phase3
----   对 DbService 的超时兜底(PHASE_TIMEOUT_SEC)。即使此处延迟不够，
----   DbService 在 phase3 关闭前会处理完消息队列中的所有 save。
+--- 优雅关闭
 ---@param source integer
 function handler.shutdown(source)
-    stopping = true  -- Fix #13: 停止定时存盘
+    stopping = true
     skynet.error(string.format("[Agent%d] shutting down, saving %d players...",
         agentIndex, playerCount))
 
     local saveCount = 0
     for uid, entry in pairs(entries) do
-        -- 触发关闭钩子(逆序)
-        if entry.player then
-            ModuleManager.triggerReverse("onShutdown", entry.player)
-            ModuleManager.unmount(entry.player)
-            entry.player:destroy()  -- Fix #11
-            entry.player = nil
-        end
+        cleanupEntry(entry, "onShutdown", { save = true, removeEntry = false })
         if not entry.loading then
-            Cast.send(dbAddr, "save", { uid = uid, data = entry.data })
             saveCount = saveCount + 1
         end
     end
 
     entries = {}
     playerCount = 0
-    
-    -- Phase1-Fix: 延迟ack为尽力而为的缓冲
-    -- 每条save预留20ms + 基础500ms，上限3秒
-    -- 注意: 即使此延迟不足，Shutdown phase3 的 PHASE_TIMEOUT_SEC 会兜底
-    local SAVE_DELAY_PER_PLAYER_CS = 2    -- 每玩家延迟(centisecond)
-    local SAVE_DELAY_BASE_CS       = 50   -- 基础延迟(centisecond)
-    local SAVE_DELAY_MAX_CS        = 300  -- 最大延迟(centisecond)
+
+    -- 延迟ack: 给 DbService 处理 save 的缓冲(尽力而为, Shutdown phase3 超时兜底)
+    local SAVE_DELAY_PER_PLAYER_CS = 2
+    local SAVE_DELAY_BASE_CS       = 50
+    local SAVE_DELAY_MAX_CS        = 300
     local delayCentisecond = math.min(
         SAVE_DELAY_BASE_CS + saveCount * SAVE_DELAY_PER_PLAYER_CS,
         SAVE_DELAY_MAX_CS)
     skynet.error(string.format("[Agent%d] sent %d saves, delaying ack by %dms",
         agentIndex, saveCount, delayCentisecond * 10))
-    
+
     skynet.timeout(delayCentisecond, function()
         skynet.error(string.format("[Agent%d] shutdown complete", agentIndex))
         Cast.send(coordinator, "shutdownAck")
