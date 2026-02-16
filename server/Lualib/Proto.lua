@@ -54,7 +54,10 @@ end
 ---@return integer|nil msgId
 ---@return table|nil   body
 function Proto.decode(data)
-    if #data < 2 then return nil, nil end
+    if #data < 2 then
+        skynet.error(string.format("[Proto] decode rejected: packet too short (%d bytes)", #data))
+        return nil, nil
+    end
     local hi, lo = data:byte(1, 2)
     local msgId = hi * 256 + lo
     -- BugFix BUG-14: 优先使用 proto type name 映射，fallback 到 MsgId key name

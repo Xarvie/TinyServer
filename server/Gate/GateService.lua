@@ -31,6 +31,7 @@ local Dispatch  = require "Dispatch"
 local Session   = require "Session"
 local Proto     = require "Proto"
 local MsgId     = require "Proto.MsgId"
+local ErrCode   = require "Proto.ErrorCode"
 
 ----------------------------------------------------------------
 -- AuthKey验证: MD5(分钟时间戳+账号+服务器ID)
@@ -258,20 +259,19 @@ end
 
 ----------------------------------------------------------------
 -- 心跳超时扫描定时器
+-- Phase1-Fix: 改为先注册下一轮再执行扫描(与 AgentService BugFix BUG-15 一致)
+--   防止 collectTimeout/push/close 耗时导致心跳间隔被拉长
 ----------------------------------------------------------------
 local function startHeartbeatTimer()
     if stopping then return end
     skynet.timeout(heartbeatCheck * 100, function()
         if stopping then return end
+        startHeartbeatTimer()  -- Phase1-Fix: 先注册下一轮
         local timeoutFds = sessions:collectTimeout(heartbeatSec)
         for _, fd in ipairs(timeoutFds) do
             skynet.error(string.format("[Gate%d] heartbeat timeout fd=%d", gateIndex, fd))
-            -- BugFix BUG-6: 调整顺序为 push → remove → close
-            -- 先推送踢线消息(此时session仍在，fd有效)
-            pushClient(fd, MsgId.S2C_Kick, { reason = -2 })
-            -- 再移除session(获取entry用于通知agent)
+            pushClient(fd, MsgId.S2C_Kick, { reason = ErrCode.KICK_HEARTBEAT })
             local entry = sessions:remove(fd)
-            -- 最后关闭连接
             safeClose(fd)
             if entry and entry.uid and entry.agent then
                 Cast.send(entry.agent, "offline", {
@@ -281,7 +281,6 @@ local function startHeartbeatTimer()
                 })
             end
         end
-        startHeartbeatTimer()  -- 循环
     end)
 end
 
@@ -354,12 +353,12 @@ function handler.authResult(source, result)
     -- BugFix BUG-32: 认证响应到达，允许客户端再次发起认证请求
     entry.pendingAuth = false
 
-    if result.code == 0 and result.uid then
+    if result.code == ErrCode.AUTH_OK and result.uid then
         -- BugFix #B13: agents为空时拒绝认证
         local agentAddr = pickAgent(result.uid)
         if not agentAddr then
             skynet.error(string.format("[Gate%d] no agents available, reject auth fd=%d", gateIndex, result.fd))
-            pushClient(result.fd, result.msgId, { code = 99, uid = 0 })
+            pushClient(result.fd, result.msgId, { code = ErrCode.AUTH_NO_AGENT, uid = 0 })
             sessions:remove(result.fd)
             safeClose(result.fd)
             return
@@ -373,7 +372,7 @@ function handler.authResult(source, result)
         if displaced then
             skynet.error(string.format("[Gate%d] same-uid collision: kicking old fd=%d for uid=%d",
                 gateIndex, displaced.fd, result.uid))
-            pushClient(displaced.fd, MsgId.S2C_Kick, { reason = 1 })
+            pushClient(displaced.fd, MsgId.S2C_Kick, { reason = ErrCode.KICK_REPLACED })
             sessions:remove(displaced.fd)
             safeClose(displaced.fd)
             -- 通知agent旧连接离线(agent会在收到新online时再次处理顶号，这里确保旧fd被清理)
@@ -481,8 +480,6 @@ function handler.shutdown(source)
     -- 设置 stopping 标志：阻止心跳定时器、新连接等后续活动
     stopping = true
 
-    -- BugFix #B22: 直接遍历当前活跃session(而非snapshot)，
-    -- remove后不会被其他逻辑再次访问
     local fdsToClose = {}
     for fd, entry in pairs(sessions.byFd) do
         fdsToClose[#fdsToClose + 1] = {
@@ -491,9 +488,8 @@ function handler.shutdown(source)
     end
 
     for _, s in ipairs(fdsToClose) do
-        -- 校验session仍然存在(可能被并发的onWsClose已处理)
         if sessions:getByFd(s.fd) then
-            pushClient(s.fd, MsgId.S2C_Kick, { reason = -1 })
+            pushClient(s.fd, MsgId.S2C_Kick, { reason = ErrCode.KICK_SERVER_SHUTDOWN })
             sessions:remove(s.fd)
             safeClose(s.fd)
             if s.uid and s.agent then
@@ -508,12 +504,13 @@ function handler.shutdown(source)
 
     sessions = Session.new()  -- 清空
     skynet.error(string.format("[Gate%d] shutdown complete", gateIndex))
-    -- BugFix BUG-12: 延迟发送 ack，给 agent 时间处理刚发出的 offline 消息
-    -- 避免 main 提前进入 phase2 向 agent 发 shutdown 时，offline 尚未处理完
-    skynet.timeout(10, function()
+    -- Phase1-Fix: 提取延迟常量，给 agent 时间处理 offline 消息
+    -- 注意: 此为尽力而为的缓冲，Shutdown phase2 超时会兜底
+    local SHUTDOWN_ACK_DELAY_CS = 10  -- 100ms
+    skynet.timeout(SHUTDOWN_ACK_DELAY_CS, function()
         Cast.send(coordinator, "shutdownAck")
     end)
 end
 
 ----------------------------------------------------------------
-Dispatch.new(handler)
+Dispatch.start(handler)

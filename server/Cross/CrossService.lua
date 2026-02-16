@@ -3,11 +3,16 @@
 -- 模式: 1~4个gate + 此进程
 -- 全cast，零call
 -- BugFix #B20: joinRoom先检查新房间容量，再移除旧房间，防止满房时丢失原房间
+--
+-- Phase1-Note: 房间数据全内存，进程重启后丢失。
+--   当前设计依赖客户端断线重连后重新 joinRoom。
+--   若需服务端持久化房间状态，应将 rooms/uidToRoomId 序列化到 DbService。
 
 local skynet   = require "skynet"
 local Cast     = require "Cast"
 local Dispatch = require "Dispatch"
 local MsgId    = require "Proto.MsgId"
+local ErrCode  = require "Proto.ErrorCode"
 
 ----------------------------------------------------------------
 -- 房间数据
@@ -94,7 +99,7 @@ function handler.joinRoom(source, req)
         Cast.send(req.agent, "crossResult", {
             uid   = req.uid,
             msgId = MsgId.S2C_JoinResult,
-            body  = { code = 0, roomId = req.roomId },
+            body  = { code = ErrCode.ROOM_JOIN_OK, roomId = req.roomId },
         })
         return
     end
@@ -104,7 +109,7 @@ function handler.joinRoom(source, req)
         Cast.send(req.agent, "crossResult", {
             uid   = req.uid,
             msgId = MsgId.S2C_JoinResult,
-            body  = { code = 1, roomId = req.roomId },
+            body  = { code = ErrCode.ROOM_FULL, roomId = req.roomId },
         })
         return  -- BugFix #B20: 拒绝时不动旧房间，玩家保留原房间
     end
@@ -135,7 +140,7 @@ function handler.joinRoom(source, req)
     Cast.send(req.agent, "crossResult", {
         uid   = req.uid,
         msgId = MsgId.S2C_JoinResult,
-        body  = { code = 0, roomId = req.roomId },
+        body  = { code = ErrCode.ROOM_JOIN_OK, roomId = req.roomId },
     })
 
     skynet.error(string.format("[Cross] %s joined room %s", req.uid, req.roomId))
@@ -189,4 +194,4 @@ function handler.shutdown(source)
 end
 
 ----------------------------------------------------------------
-Dispatch.new(handler)
+Dispatch.start(handler)

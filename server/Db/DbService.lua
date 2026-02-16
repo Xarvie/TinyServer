@@ -22,6 +22,7 @@ local mongo    = require "skynet.db.mongo"
 local Cast     = require "Cast"
 local Dispatch = require "Dispatch"
 local MsgId    = require "Proto.MsgId"
+local ErrCode  = require "Proto.ErrorCode"
 
 local agents      = {}  ---@type integer[]
 local gates       = {}  ---@type integer[]
@@ -42,7 +43,7 @@ local RETRY_INTERVAL_SEC = 5        -- 重试间隔(秒)
 ---@field data table
 ---@field retryCount integer
 
-local saveRetryQueue = {}  ---@type SaveRetryItem[]  重试队列
+local saveRetryQueue = {}  ---@type table<integer, SaveRetryItem>  uid -> 重试项(去重，只保留最新data)
 
 ----------------------------------------------------------------
 -- MongoDB 工具
@@ -66,13 +67,15 @@ end
 -- Fix #2: 重试队列处理函数（必须在handler之前定义）
 ----------------------------------------------------------------
 local function processRetryQueue()
-    if #saveRetryQueue == 0 then return end
+    local hasItems = false
+    for _ in pairs(saveRetryQueue) do hasItems = true; break end
+    if not hasItems then return end
     
-    local newQueue = {}
-    for _, item in ipairs(saveRetryQueue) do
-        local ok = safeMongo(string.format("retry_save_uid_%d", item.uid), function()
+    local toRemove = {}
+    for uid, item in pairs(saveRetryQueue) do
+        local ok = safeMongo(string.format("retry_save_uid_%d", uid), function()
             db.players:update(
-                { _id = item.uid },
+                { _id = uid },
                 { ["$set"] = { data = item.data } },
                 true
             )
@@ -80,20 +83,23 @@ local function processRetryQueue()
         
         if ok then
             skynet.error(string.format("[DB] retry save success: uid=%d after %d retries",
-                item.uid, item.retryCount + 1))
+                uid, item.retryCount + 1))
+            toRemove[#toRemove + 1] = uid
         else
             item.retryCount = item.retryCount + 1
-            if item.retryCount < MAX_RETRY_COUNT then
-                table.insert(newQueue, item)
-                skynet.error(string.format("[DB] retry save failed: uid=%d, retry=%d/%d",
-                    item.uid, item.retryCount, MAX_RETRY_COUNT))
-            else
+            if item.retryCount >= MAX_RETRY_COUNT then
                 skynet.error(string.format("[DB] CRITICAL: retry save abandoned after %d attempts: uid=%d",
-                    MAX_RETRY_COUNT, item.uid))
+                    MAX_RETRY_COUNT, uid))
+                toRemove[#toRemove + 1] = uid
+            else
+                skynet.error(string.format("[DB] retry save failed: uid=%d, retry=%d/%d",
+                    uid, item.retryCount, MAX_RETRY_COUNT))
             end
         end
     end
-    saveRetryQueue = newQueue
+    for _, uid in ipairs(toRemove) do
+        saveRetryQueue[uid] = nil
+    end
 end
 
 ----------------------------------------------------------------
@@ -172,7 +178,7 @@ function handler.login(source, req)
         Cast.send(req.gate, "authResult", {
             fd        = req.fd,
             sessionId = req.sessionId,
-            code      = 4,
+            code      = ErrCode.AUTH_DB_ERROR,
             uid       = nil,
             msgId     = MsgId.S2C_LoginResult,
         })
@@ -184,7 +190,7 @@ function handler.login(source, req)
         Cast.send(req.gate, "authResult", {
             fd        = req.fd,
             sessionId = req.sessionId,
-            code      = 0,
+            code      = ErrCode.AUTH_OK,
             uid       = record.uid,
             msgId     = MsgId.S2C_LoginResult,
         })
@@ -198,7 +204,7 @@ function handler.login(source, req)
         skynet.error(string.format("[DB] auto register allocUid failed: %s", tostring(uid)))
         Cast.send(req.gate, "authResult", {
             fd = req.fd, sessionId = req.sessionId,
-            code = 4, uid = nil, msgId = MsgId.S2C_LoginResult,
+            code = ErrCode.AUTH_DB_ERROR, uid = nil, msgId = MsgId.S2C_LoginResult,
         })
         return
     end
@@ -218,7 +224,7 @@ function handler.login(source, req)
         if ok2 and record2 then
             Cast.send(req.gate, "authResult", {
                 fd = req.fd, sessionId = req.sessionId,
-                code = 0, uid = record2.uid, msgId = MsgId.S2C_LoginResult,
+                code = ErrCode.AUTH_OK, uid = record2.uid, msgId = MsgId.S2C_LoginResult,
             })
             skynet.error(string.format("[DB] auto register race, recheck ok: %s -> %d", req.account, record2.uid))
             return
@@ -226,7 +232,7 @@ function handler.login(source, req)
         -- 仍然失败
         Cast.send(req.gate, "authResult", {
             fd = req.fd, sessionId = req.sessionId,
-            code = 4, uid = nil, msgId = MsgId.S2C_LoginResult,
+            code = ErrCode.AUTH_DB_ERROR, uid = nil, msgId = MsgId.S2C_LoginResult,
         })
         return
     end
@@ -239,7 +245,7 @@ function handler.login(source, req)
     Cast.send(req.gate, "authResult", {
         fd        = req.fd,
         sessionId = req.sessionId,
-        code      = 0,
+        code      = ErrCode.AUTH_OK,
         uid       = uid,
         msgId     = MsgId.S2C_LoginResult,
     })
@@ -279,15 +285,30 @@ function handler.save(source, req)
         )
     end)
     
-    -- Fix #2: save失败时加入重试队列
+    -- Fix #2 + Phase1-Fix: save失败时加入重试队列(按uid去重，新data覆盖旧data)
     if not ok then
-        table.insert(saveRetryQueue, {
-            uid = req.uid,
-            data = req.data,
-            retryCount = 0,
-        })
-        skynet.error(string.format("[DB] save failed for uid=%d, added to retry queue (queue size=%d)",
-            req.uid, #saveRetryQueue))
+        local existing = saveRetryQueue[req.uid]
+        if existing then
+            -- 同uid已有重试项，用最新data替换(防止旧data覆盖新data)
+            existing.data = req.data
+            -- retryCount 保留，不重置(避免无限重试)
+            skynet.error(string.format("[DB] save failed for uid=%d, updated existing retry item",
+                req.uid))
+        else
+            saveRetryQueue[req.uid] = {
+                uid = req.uid,
+                data = req.data,
+                retryCount = 0,
+            }
+            skynet.error(string.format("[DB] save failed for uid=%d, added to retry queue",
+                req.uid))
+        end
+    else
+        -- Phase1-Fix: save成功时，移除该uid的重试项(防止旧重试覆盖刚成功的新数据)
+        if saveRetryQueue[req.uid] then
+            saveRetryQueue[req.uid] = nil
+            skynet.error(string.format("[DB] save success for uid=%d, removed from retry queue", req.uid))
+        end
     end
 end
 
@@ -297,21 +318,23 @@ end
 function handler.shutdown(source)
     skynet.error("[DB] shutting down...")
     
-    -- Fix #2: flush重试队列
-    if #saveRetryQueue > 0 then
-        skynet.error(string.format("[DB] flushing retry queue (%d items)...", #saveRetryQueue))
-        for _, item in ipairs(saveRetryQueue) do
-            local ok = safeMongo(string.format("shutdown_flush_uid_%d", item.uid), function()
+    -- Fix #2 + Phase1-Fix: flush重试队列(uid-keyed)
+    local retryCount = 0
+    for _ in pairs(saveRetryQueue) do retryCount = retryCount + 1 end
+    if retryCount > 0 then
+        skynet.error(string.format("[DB] flushing retry queue (%d items)...", retryCount))
+        for uid, item in pairs(saveRetryQueue) do
+            local ok = safeMongo(string.format("shutdown_flush_uid_%d", uid), function()
                 db.players:update(
-                    { _id = item.uid },
+                    { _id = uid },
                     { ["$set"] = { data = item.data } },
                     true
                 )
             end)
             if ok then
-                skynet.error(string.format("[DB] shutdown flush success: uid=%d", item.uid))
+                skynet.error(string.format("[DB] shutdown flush success: uid=%d", uid))
             else
-                skynet.error(string.format("[DB] CRITICAL: shutdown flush failed: uid=%d", item.uid))
+                skynet.error(string.format("[DB] CRITICAL: shutdown flush failed: uid=%d", uid))
             end
         end
         saveRetryQueue = {}

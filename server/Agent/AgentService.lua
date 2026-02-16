@@ -27,6 +27,7 @@ local skynet         = require "skynet"
 local Cast           = require "Cast"
 local Dispatch       = require "Dispatch"
 local MsgId          = require "Proto.MsgId"
+local ErrCode        = require "Proto.ErrorCode"
 local ModuleManager  = require "Agent.ModuleManager"
 local Player         = require "Logic.Player.Player"
 
@@ -103,8 +104,8 @@ local containerMsgHandlers = {
             Cast.send(dbAddr, "save", { uid = entry.uid, data = entry.data })
         end
 
-        -- 通知gate踢下线(reason=0 正常登出)
-        Cast.send(entry.gate, "kick", { fd = entry.fd, uid = entry.uid, reason = 0 })
+        -- 通知gate踢下线
+        Cast.send(entry.gate, "kick", { fd = entry.fd, uid = entry.uid, reason = ErrCode.KICK_NORMAL_LOGOUT })
 
         -- 清理entry
         entries[entry.uid] = nil
@@ -208,7 +209,7 @@ function handler.online(source, req)
     local old = entries[req.uid]
     if old then
         -- BugFix #B16: kick携带uid
-        Cast.send(old.gate, "kick", { fd = old.fd, uid = old.uid, reason = 1 })
+        Cast.send(old.gate, "kick", { fd = old.fd, uid = old.uid, reason = ErrCode.KICK_REPLACED })
         -- 触发旧Player的登出清理(逆序)
         if old.player then
             ModuleManager.triggerReverse("onLogout", old.player)
@@ -299,10 +300,11 @@ function handler.loadResult(source, result)
     entry.pending = nil
     if pending then
         for _, msg in ipairs(pending) do
-            -- BugFix #B17
-            if not entries[result.uid] then
+            -- BugFix #B17 + Phase1-Fix: 检查entry身份一致性，而非仅存在性
+            -- dispatchClientMsg中若触发顶号(如C2S_Logout), entries[uid]可能指向新entry
+            if entries[result.uid] ~= entry then
                 skynet.error(string.format(
-                    "[Agent%d] pending replay interrupted: uid=%d removed",
+                    "[Agent%d] pending replay interrupted: uid=%d entry replaced or removed",
                     agentIndex, result.uid))
                 break
             end
@@ -392,7 +394,9 @@ end
 
 --- 优雅关闭: 触发所有在线玩家的关闭钩子 + 存盘
 --- Fix #2: 只存盘非loading的玩家
---- Fix #3: 根据save数量动态延迟ack，确保DB有时间处理
+--- Fix #3 + Phase1-Fix: 延迟ack为尽力而为的缓冲，真正的保障在 Shutdown phase3
+---   对 DbService 的超时兜底(PHASE_TIMEOUT_SEC)。即使此处延迟不够，
+---   DbService 在 phase3 关闭前会处理完消息队列中的所有 save。
 ---@param source integer
 function handler.shutdown(source)
     stopping = true  -- Fix #13: 停止定时存盘
@@ -417,9 +421,15 @@ function handler.shutdown(source)
     entries = {}
     playerCount = 0
     
-    -- Fix #3: 根据save数量动态延迟ack时间
-    -- 每条save预留20ms处理时间 + 基础延迟500ms，上限3秒
-    local delayCentisecond = math.min(50 + saveCount * 2, 300)
+    -- Phase1-Fix: 延迟ack为尽力而为的缓冲
+    -- 每条save预留20ms + 基础500ms，上限3秒
+    -- 注意: 即使此延迟不足，Shutdown phase3 的 PHASE_TIMEOUT_SEC 会兜底
+    local SAVE_DELAY_PER_PLAYER_CS = 2    -- 每玩家延迟(centisecond)
+    local SAVE_DELAY_BASE_CS       = 50   -- 基础延迟(centisecond)
+    local SAVE_DELAY_MAX_CS        = 300  -- 最大延迟(centisecond)
+    local delayCentisecond = math.min(
+        SAVE_DELAY_BASE_CS + saveCount * SAVE_DELAY_PER_PLAYER_CS,
+        SAVE_DELAY_MAX_CS)
     skynet.error(string.format("[Agent%d] sent %d saves, delaying ack by %dms",
         agentIndex, saveCount, delayCentisecond * 10))
     
@@ -430,4 +440,4 @@ function handler.shutdown(source)
 end
 
 ----------------------------------------------------------------
-Dispatch.new(handler)
+Dispatch.start(handler)

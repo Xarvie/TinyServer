@@ -16,18 +16,6 @@ function Cast.send(target, cmd, ...)
     skynet.send(target, "lua", cmd, ...)
 end
 
---- @deprecated BugFix BUG-18: 此方法为死代码，未被任何模块使用，
---- 且其 "client" 类型语义与框架 "全cast、纯lua table" 设计不一致。
---- 保留以兼容潜在的外部调用方，计划在下个大版本移除。
---- 向目标服务发送原始消息(用于转发)
----@param target integer  服务地址
----@param msg any         打包的消息
----@param sz integer      消息大小
-function Cast.redirect(target, msg, sz)
-    skynet.error("[Cast] WARNING: Cast.redirect is deprecated and will be removed")
-    skynet.redirect(target, 0, "client", 0, msg, sz)
-end
-
 --- 广播给一组服务
 ---@param targets integer[]  服务地址列表
 ---@param cmd string         命令名

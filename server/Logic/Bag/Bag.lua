@@ -89,7 +89,13 @@ end
 --- 此时所有依赖模块的 onDbInit 已完成(拓扑序保证)
 function Bag:onDbInit()
     -- BugFix BUG-34: 统一使用 modName 作为 data key
+    -- Phase1-Fix: 防御性nil检查，防止destroy后或异常流程中崩溃
     local data = self.player:getModData(self.modName)
+    if not data then
+        skynet.error(string.format("[Bag] onDbInit: getModData returned nil for uid=%s, skip",
+            tostring(self.player.uid)))
+        return
+    end
 
     -- 初始化默认结构(新玩家 / 数据迁移)
     if not data.items then

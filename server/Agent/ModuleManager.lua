@@ -142,14 +142,16 @@ function M.scan(baseDir)
     -- lfs 遍历时将 "." 替换为 "/" 作为文件系统路径
     local fsBaseDir = baseDir:gsub("%.", "/")
 
-    local ok, iter, dir = pcall(lfs.dir, fsBaseDir)
-    if not ok then
-        skynet.error(string.format("[ModuleManager] WARNING: cannot scan '%s': %s", fsBaseDir, tostring(iter)))
+    -- Phase1-Fix: pcall(lfs.dir) 可能在某些lfs版本中破坏迭代器返回值
+    -- 先用 lfs.attributes 检查目录存在性，再直接调用 lfs.dir
+    local baseAttr = lfs.attributes(fsBaseDir)
+    if not baseAttr or baseAttr.mode ~= "directory" then
+        skynet.error(string.format("[ModuleManager] WARNING: cannot scan '%s': not a directory", fsBaseDir))
         return
     end
 
     local discovered = 0
-    for dirName in iter, dir do
+    for dirName in lfs.dir(fsBaseDir) do
         -- 跳过 . .. 和 Player 目录
         if dirName ~= "." and dirName ~= ".."
             and dirName:lower() ~= "player" then
